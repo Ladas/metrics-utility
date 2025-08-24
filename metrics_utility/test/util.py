@@ -77,6 +77,21 @@ def run_gather_int(env, options):
         Command().handle(**options)
 
 
+def run_command_int(command_name, env, options):
+    """Run any management command internally with environment and options."""
+    if command_name == 'build_report':
+        run_build_int(env, options)
+    elif command_name == 'gather_automation_controller_billing_data':
+        run_gather_int(env, options)
+    elif command_name == 'compute_rollups':
+        from metrics_utility.management.commands.compute_rollups import Command
+
+        with temporary_env(env):
+            Command().handle(**options)
+    else:
+        raise ValueError(f'Unsupported command: {command_name}')
+
+
 def generate_renewal_guidance_dataframe(is_empty=False, current_datetime=None):
     """
     Generates a pandas DataFrame with specific, hardcoded mock renewal guidance

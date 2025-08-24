@@ -107,8 +107,14 @@ class ReportCCSPv2(Base):
 
         # First sheet index
         sheet_index = 0
-        directs = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == DIRECT]
-        indirects = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == INDIRECT]
+
+        # Handle empty dataframes gracefully
+        if job_host_summary_dataframe is None or job_host_summary_dataframe.empty:
+            directs = pd.DataFrame()
+            indirects = pd.DataFrame()
+        else:
+            directs = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == DIRECT]
+            indirects = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == INDIRECT]
 
         if 'ccsp_summary' in self.optional_report_sheets():
             ws = self.add_sheet('Usage Reporting', sheet_index, self.config['column_widths'])
@@ -161,35 +167,65 @@ class ReportCCSPv2(Base):
             self._build_data_section_usage_by_org(1, ws, job_host_summary_dataframe)
             sheet_index += 1
 
-        if events_dataframe is not None:
-            if 'usage_by_collections' in self.optional_report_sheets():
-                # Sheet with usage by collections
-                ws = self.add_sheet('Usage by collections', sheet_index, self.config['data_column_widths'])
+        # Handle usage sheets whether events_dataframe has data or not
+        if 'usage_by_collections' in self.optional_report_sheets():
+            # Sheet with usage by collections
+            ws = self.add_sheet('Usage by collections', sheet_index, self.config['data_column_widths'])
+            if events_dataframe is not None:
                 self._build_data_section_usage_by_collections(1, ws, events_dataframe)
-                sheet_index += 1
+            else:
+                # Create empty sheet with proper headers
+                self._build_data_section_usage_by_collections(1, ws, pd.DataFrame())
+            sheet_index += 1
 
-            if 'usage_by_roles' in self.optional_report_sheets():
-                # Sheet with usage by roles
-                ws = self.add_sheet('Usage by roles', sheet_index, self.config['data_column_widths'])
+        if 'usage_by_roles' in self.optional_report_sheets():
+            # Sheet with usage by roles
+            ws = self.add_sheet('Usage by roles', sheet_index, self.config['data_column_widths'])
+            if events_dataframe is not None:
                 self._build_data_section_usage_by_roles(1, ws, events_dataframe)
-                sheet_index += 1
+            else:
+                # Create empty sheet with proper headers
+                self._build_data_section_usage_by_roles(1, ws, pd.DataFrame())
+            sheet_index += 1
 
-            if 'usage_by_modules' in self.optional_report_sheets():
-                # Sheet with usage by modules
-                ws = self.add_sheet('Usage by modules', sheet_index, self.config['data_column_widths'])
+        if 'usage_by_modules' in self.optional_report_sheets():
+            # Sheet with usage by modules
+            ws = self.add_sheet('Usage by modules', sheet_index, self.config['data_column_widths'])
+            if events_dataframe is not None:
                 self._build_data_section_usage_by_modules(1, ws, events_dataframe)
-                sheet_index += 1
+            else:
+                # Create empty sheet with proper headers
+                self._build_data_section_usage_by_modules(1, ws, pd.DataFrame())
+            sheet_index += 1
 
         if 'managed_nodes_by_organizations' in self.optional_report_sheets():
             # Sheet with list of managed nodes by organization, this will generate multiple tabs
-            organization_names = sorted(job_host_summary_dataframe['organization_name'].unique())
-            for organization_name in organization_names:
-                ws = self.add_sheet(organization_name, sheet_index, self.config['data_column_widths'])
+            if (
+                job_host_summary_dataframe is not None
+                and not job_host_summary_dataframe.empty
+                and 'organization_name' in job_host_summary_dataframe.columns
+            ):
+                organization_names = sorted(job_host_summary_dataframe['organization_name'].unique())
+            else:
+                organization_names = []
 
-                # Filter the data for a certain organization
-                filtered_job_host_summary_dataframe = job_host_summary_dataframe[job_host_summary_dataframe['organization_name'] == organization_name]
-                self._build_data_section_usage_by_node(1, ws, filtered_job_host_summary_dataframe, mode='by_organization')
+            if not organization_names:
+                # If no organizations, create a default sheet to avoid empty workbook
+                ws = self.add_sheet('No Organizations', sheet_index, self.config['data_column_widths'])
+                # Create empty dataframe for the function
+                empty_dataframe = pd.DataFrame()
+                self._build_data_section_usage_by_node(1, ws, empty_dataframe, mode='by_organization')
                 sheet_index += 1
+            else:
+                for organization_name in organization_names:
+                    ws = self.add_sheet(organization_name, sheet_index, self.config['data_column_widths'])
+
+                    # Filter the data for a certain organization
+                    filtered_job_host_summary_dataframe = job_host_summary_dataframe[
+                        job_host_summary_dataframe['organization_name'] == organization_name
+                    ]
+                    self._build_data_section_usage_by_node(1, ws, filtered_job_host_summary_dataframe, mode='by_organization')
+                    sheet_index += 1
 
         if 'data_collection_status' in self.optional_report_sheets():
             ws = self.add_sheet('Data collection status', sheet_index, self.config['status_column_widths'])
@@ -230,6 +266,15 @@ class ReportCCSPv2(Base):
 
     def _build_data_section_collection_missing(self, current_row, ws, df):
         """builds a table showing any gaps not covered by any since-until collection interval"""
+
+        # Handle empty dataframes gracefully
+        if df is None or df.empty or 'file_name' not in df.columns:
+            # Create an empty table with just headers
+            headers = ['CSV filename', 'Missing from', 'Missing until', 'Gap in seconds']
+            for c_idx, header in enumerate(headers, 1):
+                cell = ws.cell(row=current_row, column=c_idx)
+                cell.value = header
+            return current_row + 1
 
         # add artificial 0-interval collects at start & end - to detect gaps between opt_since & first since, and last until & opt_until
         since, until = self._since_until()
@@ -280,6 +325,15 @@ class ReportCCSPv2(Base):
         return self._build_table(current_row, ws, rows)
 
     def _build_data_section_collection_status(self, first_row, ws, df):
+        # Handle empty dataframes gracefully
+        if df is None or df.empty or 'file_name' not in df.columns:
+            # Create an empty table with just headers
+            headers = ['Collection timestamp', 'Filter since', 'Filter until', 'CSV filename', 'Status', 'Elapsed', 'Time since\nprevious collection']
+            for c_idx, header in enumerate(headers, 1):
+                cell = ws.cell(row=first_row, column=c_idx)
+                cell.value = header
+            return first_row + 1
+
         # time difference between the current and previous row with the same file_name & sort
         df = df.sort_values(['file_name', 'collection_start_timestamp']).reset_index(drop=True)
         df['time_diff'] = df.groupby('file_name')['collection_start_timestamp'].diff()
@@ -332,15 +386,32 @@ class ReportCCSPv2(Base):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        # Rename the columns based on the template
-        ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
-            organizations=('organization_name', 'nunique'),
-            host_runs=('host_name', 'count'),
-            task_runs=('task_runs', 'sum'),
-            first_automation=('first_automation', 'min'),
-            last_automation=('last_automation', 'max'),
-        )
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'host_name' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(
+                columns=['host_name', 'organizations', 'host_runs', 'task_runs', 'first_automation', 'last_automation']
+            )
+            pivoted_dataframe = pd.DataFrame()
+        else:
+            # Rename the columns based on the template
+            ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
+                organizations=('organization_name', 'nunique'),
+                host_runs=('host_name', 'count'),
+                task_runs=('task_runs', 'sum'),
+                first_automation=('first_automation', 'min'),
+                last_automation=('last_automation', 'max'),
+            )
+
+            # Create dataframe with hostname and orgs as columns, having last automation for each host
+            pivoted_dataframe = dataframe.pivot_table(
+                index='host_name',
+                columns='organization_name',
+                values='last_automation',
+                aggfunc='max',  # You can use 'max', 'min', 'mean', etc., depending on your needs
+            )
+            # Reset index only for grouped data (host_name becomes a regular column)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
         columns = [
             'host_name',
             'organizations',
@@ -354,14 +425,6 @@ class ReportCCSPv2(Base):
             columns = [col for col in columns if col not in ['organizations']]
 
         ccsp_report_dataframe = ccsp_report_dataframe.reindex(columns=columns)
-
-        # Create dataframe with hostname and orgs as columns, having last automation for each host
-        pivoted_dataframe = dataframe.pivot_table(
-            index='host_name',
-            columns='organization_name',
-            values='last_automation',
-            aggfunc='max',  # You can use 'max', 'min', 'mean', etc., depending on your needs
-        )
 
         # Set index on host_name for join
         ccsp_report_dataframe.set_index('host_name', inplace=True)
@@ -405,18 +468,26 @@ class ReportCCSPv2(Base):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        dataframe['job_remote_id_install_uuid'] = list(zip(dataframe['job_remote_id'], dataframe['install_uuid']))
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'job_remote_id' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(
+                columns=['job_template_name', 'organization_name', 'job_runs', 'host_runs_unique', 'host_runs', 'task_runs', 'first_run', 'last_run']
+            )
+        else:
+            dataframe['job_remote_id_install_uuid'] = list(zip(dataframe['job_remote_id'], dataframe['install_uuid']))
 
-        # Rename the columns based on the template
-        ccsp_report_dataframe = dataframe.groupby(['organization_name', 'job_template_name'], dropna=False).agg(
-            job_runs=('job_remote_id_install_uuid', 'nunique'),
-            host_runs_unique=('host_name', 'nunique'),
-            host_runs=('host_name', 'count'),
-            task_runs=('task_runs', 'sum'),
-            first_run=('job_created', 'min'),
-            last_run=('job_created', 'max'),
-        )
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
+            # Rename the columns based on the template
+            ccsp_report_dataframe = dataframe.groupby(['organization_name', 'job_template_name'], dropna=False).agg(
+                job_runs=('job_remote_id_install_uuid', 'nunique'),
+                host_runs_unique=('host_name', 'nunique'),
+                host_runs=('host_name', 'count'),
+                task_runs=('task_runs', 'sum'),
+                first_run=('job_created', 'min'),
+                last_run=('job_created', 'max'),
+            )
+            # Reset index only for grouped data (organization_name and job_template_name become regular columns)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
         ccsp_report_dataframe = ccsp_report_dataframe.reindex(
             columns=['job_template_name', 'organization_name', 'job_runs', 'host_runs_unique', 'host_runs', 'task_runs', 'first_run', 'last_run']
         )
@@ -458,25 +529,30 @@ class ReportCCSPv2(Base):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        dataframe['job_remote_id_install_uuid'] = list(zip(dataframe['job_remote_id'], dataframe['install_uuid']))
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'job_remote_id' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(columns=['organization_name', 'job_runs', 'host_runs_unique', 'host_runs', 'task_runs'])
+        else:
+            dataframe['job_remote_id_install_uuid'] = list(zip(dataframe['job_remote_id'], dataframe['install_uuid']))
 
-        agg_dict = {
-            'job_runs': ('job_remote_id_install_uuid', 'nunique'),
-            # Only count host_name if the managed_node_type is "DIRECT"
-            'host_runs_unique': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].nunique()),
-            'host_runs': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].count()),
-            'task_runs': ('task_runs', 'sum'),
-        }
+            agg_dict = {
+                'job_runs': ('job_remote_id_install_uuid', 'nunique'),
+                # Only count host_name if the managed_node_type is "DIRECT"
+                'host_runs_unique': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].nunique()),
+                'host_runs': ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == DIRECT].count()),
+                'task_runs': ('task_runs', 'sum'),
+            }
 
-        # Add the INDIRECT aggregations only if the condition is met
-        if 'indirectly_managed_nodes' in self.optional_report_sheets():
-            agg_dict['indirect_host_runs_unique'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].nunique())
-            agg_dict['indirect_host_runs'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].count())
+            # Add the INDIRECT aggregations only if the condition is met
+            if 'indirectly_managed_nodes' in self.optional_report_sheets():
+                agg_dict['indirect_host_runs_unique'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].nunique())
+                agg_dict['indirect_host_runs'] = ('host_name', lambda x: x[dataframe.loc[x.index, 'managed_node_type'] == INDIRECT].count())
 
-        # Now pass this dictionary into .agg()
-        ccsp_report_dataframe = dataframe.groupby('organization_name', dropna=False).agg(**agg_dict)
-
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
+            # Now pass this dictionary into .agg()
+            ccsp_report_dataframe = dataframe.groupby('organization_name', dropna=False).agg(**agg_dict)
+            # Reset index only for grouped data (organization_name becomes a regular column)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         # Build columns list dynamically
         columns = ['organization_name', 'job_runs', 'host_runs_unique', 'host_runs']
@@ -646,7 +722,11 @@ class ReportCCSPv2(Base):
         )
 
         ccsp_report = {}
-        quantity_consumed = dataframe['host_name'].nunique()
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'host_name' not in dataframe.columns:
+            quantity_consumed = 0
+        else:
+            quantity_consumed = dataframe['host_name'].nunique()
 
         if quantity_consumed > 0:
             # COmpute the unique hostnam count that are in the df index

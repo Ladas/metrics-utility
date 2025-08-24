@@ -1,10 +1,17 @@
 import json
 import os
 import tarfile
+import time
+
+from datetime import datetime
+from typing import List, Tuple
 
 import pandas as pd
 
+from opentelemetry import trace
+
 from metrics_utility.logger import logger
+from metrics_utility.tracing import add_span_attributes
 
 
 # csv name => [ sheet_names ]
@@ -57,8 +64,28 @@ class Base:
             logger.warning(f'{self.LOG_PREFIX} missing required file under path: {file_path} and date: {self.date}')
 
     def process_tarballs(self, path, temp_dir):
-        _safe_extract(path, temp_dir)
-        config = self.load_config(os.path.join(temp_dir, 'config.json'))
+        """Process tarball extraction and CSV data loading with comprehensive tracing"""
+
+        with trace.get_tracer(__name__).start_as_current_span('tarball.extraction') as extraction_span:
+            # Add tarball context to span
+            tarball_size = os.path.getsize(path) if os.path.exists(path) else 0
+            add_span_attributes(extraction_span, **{'tarball.path': path, 'tarball.size_bytes': tarball_size, 'tarball.temp_dir': temp_dir})
+
+            start_time = time.time()
+            _safe_extract(path, temp_dir)
+            extraction_time = time.time() - start_time
+
+            add_span_attributes(
+                extraction_span,
+                **{
+                    'tarball.extraction_time_seconds': extraction_time,
+                    'tarball.extraction_rate_mbps': (tarball_size / (1024 * 1024)) / extraction_time if extraction_time > 0 else 0,
+                },
+            )
+
+        with trace.get_tracer(__name__).start_as_current_span('tarball.config.loading') as config_span:
+            config = self.load_config(os.path.join(temp_dir, 'config.json'))
+            add_span_attributes(config_span, **{'config.loaded': True, 'config.path': os.path.join(temp_dir, 'config.json')})
 
         empty_dataframe = pd.DataFrame([{}])
         needed_data = {
@@ -70,20 +97,65 @@ class Base:
             'main_jobevent': empty_dataframe,
         }
 
+        # Track which CSVs are processed
+        processed_csvs = []
+        total_records = 0
+
         if self.csv_enabled('data_collection_status'):
-            needed_data['data_collection_status'] = self.build_data_batch(temp_dir, 'data_collection_status')
+            with trace.get_tracer(__name__).start_as_current_span('csv.processing.data_collection_status') as csv_span:
+                df = self.build_data_batch(temp_dir, 'data_collection_status')
+                needed_data['data_collection_status'] = df
+                records = len(df) if df is not None and not df.empty else 0
+                total_records += records
+                processed_csvs.append('data_collection_status')
+                add_span_attributes(csv_span, **{'csv.name': 'data_collection_status', 'csv.records': records})
 
         if self.csv_enabled('job_host_summary'):
-            needed_data['job_host_summary'] = self.build_data_batch(temp_dir, 'job_host_summary')
+            with trace.get_tracer(__name__).start_as_current_span('csv.processing.job_host_summary') as csv_span:
+                df = self.build_data_batch(temp_dir, 'job_host_summary')
+                needed_data['job_host_summary'] = df
+                records = len(df) if df is not None and not df.empty else 0
+                total_records += records
+                processed_csvs.append('job_host_summary')
+                add_span_attributes(csv_span, **{'csv.name': 'job_host_summary', 'csv.records': records})
 
         if self.csv_enabled('main_indirectmanagednodeaudit'):
-            needed_data['indirect_nodes'] = self.build_data_batch(temp_dir, 'main_indirectmanagednodeaudit')
+            with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_indirectmanagednodeaudit') as csv_span:
+                df = self.build_data_batch(temp_dir, 'main_indirectmanagednodeaudit')
+                needed_data['indirect_nodes'] = df
+                records = len(df) if df is not None and not df.empty else 0
+                total_records += records
+                processed_csvs.append('main_indirectmanagednodeaudit')
+                add_span_attributes(csv_span, **{'csv.name': 'main_indirectmanagednodeaudit', 'csv.records': records})
 
         if self.csv_enabled('main_jobevent'):
-            needed_data['main_jobevent'] = self.build_data_batch(temp_dir, 'main_jobevent')
+            with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_jobevent') as csv_span:
+                df = self.build_data_batch(temp_dir, 'main_jobevent')
+                needed_data['main_jobevent'] = df
+                records = len(df) if df is not None and not df.empty else 0
+                total_records += records
+                processed_csvs.append('main_jobevent')
+                add_span_attributes(csv_span, **{'csv.name': 'main_jobevent', 'csv.records': records})
 
         if self.csv_enabled('main_host'):
-            needed_data['main_host'] = self.build_data_batch(temp_dir, 'main_host')
+            with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_host') as csv_span:
+                df = self.build_data_batch(temp_dir, 'main_host')
+                needed_data['main_host'] = df
+                records = len(df) if df is not None and not df.empty else 0
+                total_records += records
+                processed_csvs.append('main_host')
+                add_span_attributes(csv_span, **{'csv.name': 'main_host', 'csv.records': records})
+
+        # Add summary metrics to the current span
+        current_span = trace.get_current_span()
+        add_span_attributes(
+            current_span,
+            **{
+                'tarball.processing.total_records': total_records,
+                'tarball.processing.csv_count': len(processed_csvs),
+                'tarball.processing.csvs_processed': ','.join(processed_csvs),
+            },
+        )
 
         return needed_data
 
@@ -117,7 +189,25 @@ class Base:
         Returns a boolean so we know which sheets to provide in the report.
         """
         sheet_options = self.extra_params.get('optional_sheets')
+        if sheet_options is None:
+            return False
         return bool(set(sheet_options) & set(sheets_required))
+
+    def scan_tarballs_for_date(self, target_date) -> List[Tuple[str, datetime]]:
+        """
+        Scan for tarballs available for a specific date without extracting them
+
+        Args:
+            target_date: Date to scan for
+
+        Returns:
+            List of tuples (tarball_path, modification_time)
+
+        Note:
+            This is a base implementation that should be overridden by specific extractors
+        """
+        logger.debug(f'{self.LOG_PREFIX} Base scan_tarballs_for_date called for {target_date} - no tarballs found')
+        return []
 
 
 def _write_member(member_path, file_obj, max_size, total_extracted_size):
