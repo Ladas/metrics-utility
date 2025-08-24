@@ -170,7 +170,22 @@ class Base:
                 # This can happen when dataframe hasn't been properly grouped yet
                 pass
 
-        result = df.astype(types)
+        # Handle NA/NaN values before casting to avoid "Cannot convert non-finite values (NA or inf) to integer" error
+        result = df.copy()
+        for col, col_type in types.items():
+            if col in result.columns:
+                if col_type is int or col_type == 'int' or str(col_type).startswith('int'):
+                    # For integer columns, fill NaN with 0 before casting
+                    result[col] = result[col].fillna(0).astype(col_type)
+                elif col_type is float or col_type == 'float' or str(col_type).startswith('float'):
+                    # For float columns, NaN values are fine
+                    result[col] = result[col].astype(col_type)
+                elif str(col_type) == 'datetime64[ns]':
+                    # For datetime columns, use pd.to_datetime which handles NaN properly
+                    result[col] = pd.to_datetime(result[col])
+                else:
+                    # For other types (str, object, etc.), use standard astype
+                    result[col] = result[col].astype(col_type)
 
         cast_duration = time.time() - start_time
         add_span_attributes(
@@ -216,18 +231,45 @@ class Base:
 
         for col in columns_to_process:
             col_start_time = time.time()
-            
+
             # Check if merge suffix columns exist (they're only created when there are actual conflicts)
             col_x = f'{col}_x'
             col_y = f'{col}_y'
-            
+
             if col_x not in df.columns or col_y not in df.columns:
                 # No merge conflicts for this column, skip summarization
                 continue
 
             if operations.get(col) == 'min':
-                # Handle NaN values properly for min operation
-                df[col] = df[[col_x, col_y]].min(axis=1, skipna=True)
+                # Handle NaN values properly for min operation, with special handling for mixed types
+                try:
+                    df[col] = df[[col_x, col_y]].min(axis=1, skipna=True)
+                except TypeError as e:
+                    if 'not supported between instances' in str(e):
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f'Mixed type comparison detected for column {col} during min operation: {e}. Using safe comparison fallback.')
+                        
+                        # Handle mixed type comparison by using apply with proper NaN handling
+                        def safe_min(row):
+                            val_x = row[col_x]
+                            val_y = row[col_y]
+                            
+                            # If both are NaN, return NaN
+                            if pd.isna(val_x) and pd.isna(val_y):
+                                return pd.NaT if 'datetime' in str(type(val_x)) or 'datetime' in str(type(val_y)) else None
+                            # If one is NaN, return the other
+                            elif pd.isna(val_x):
+                                return val_y
+                            elif pd.isna(val_y):
+                                return val_x
+                            # Both are valid, compare them
+                            else:
+                                return min(val_x, val_y)
+                        
+                        df[col] = df.apply(safe_min, axis=1)
+                    else:
+                        raise  # Re-raise if it's a different TypeError
             elif operations.get(col) == 'max':
                 # Handle NaN values properly for max operation, with special handling for mixed types
                 col_x_data = df[col_x]
@@ -238,6 +280,10 @@ class Base:
                     df[col] = df[[col_x, col_y]].max(axis=1, skipna=True)
                 except TypeError as e:
                     if 'not supported between instances' in str(e):
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f'Mixed type comparison detected for column {col} during max operation: {e}. Using safe comparison fallback.')
+                        
                         # Handle mixed type comparison by using apply with proper NaN handling
                         def safe_max(row):
                             val_x = row[col_x]
@@ -411,7 +457,7 @@ class Base:
         if len(unique_index_cols) > 0:
             # Check for actual duplicates based on unique index columns
             has_duplicates = df.duplicated(subset=unique_index_cols, keep=False).any()
-            
+
             if has_duplicates:
                 df_grouped = self.regroup(df)
                 regroup_duration = time.time() - regroup_start
@@ -591,6 +637,9 @@ class Base:
                 if col in df.columns:
                     if col_type == 'datetime64[ns]':
                         df[col] = pd.to_datetime(df[col])
+                    elif col_type == int or col_type == 'int' or str(col_type).startswith('int'):
+                        # For integer columns, fill NaN with 0 before casting
+                        df[col] = df[col].fillna(0).astype(col_type)
                     else:
                         df[col] = df[col].astype(col_type)
 
@@ -600,19 +649,19 @@ class Base:
         """Apply type casting for raw CSV data, skipping manually converted columns."""
         if manually_converted_columns is None:
             manually_converted_columns = set()
-        
+
         # Use raw data cast types if available, otherwise fall back to regular cast types
         if hasattr(self.__class__, 'raw_data_cast_types'):
             raw_cast_types = self.__class__.raw_data_cast_types() or {}
         else:
             raw_cast_types = self.__class__.cast_types() or {}
-        
+
         # Filter out manually converted columns and columns that don't exist
         available_cast_types = {
-            k: v for k, v in raw_cast_types.items() 
+            k: v for k, v in raw_cast_types.items()
             if k in df.columns and k not in manually_converted_columns
         }
-        
+
         if available_cast_types:
             df = self.cast_dataframe(df, available_cast_types)
 
@@ -623,6 +672,9 @@ class Base:
                 if col in df.columns and col not in manually_converted_columns:
                     if col_type == 'datetime64[ns]':
                         df[col] = pd.to_datetime(df[col])
+                    elif col_type == int or col_type == 'int' or str(col_type).startswith('int'):
+                        # For integer columns, fill NaN with 0 before casting
+                        df[col] = df[col].fillna(0).astype(col_type)
                     else:
                         df[col] = df[col].astype(col_type)
 
