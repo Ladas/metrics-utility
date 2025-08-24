@@ -180,10 +180,16 @@ class DataframeJobhostSummaryUsage(Base):
 
         # Date parsing operations (manual conversion)
         datetime_start = time.time()
-        billing_data['created'] = pd.to_datetime(billing_data['created'], format='ISO8601').dt.tz_localize(None)
+        # Convert to datetime, ensuring all values are properly typed (float NaNs become pd.NaT)
+        # First, ensure any float NaN values are converted to string 'NaN' for proper handling
+        # TODO: Add tracking/logging for failed datetime casting to identify data quality issues
+        billing_data['created'] = billing_data['created'].astype(str)
+        billing_data['created'] = pd.to_datetime(billing_data['created'], format='ISO8601', errors='coerce').dt.tz_localize(None)
 
         if 'job_created' in billing_data:
-            billing_data['job_created'] = pd.to_datetime(billing_data['job_created'], format='ISO8601').dt.tz_localize(None)
+            # Ensure job_created column exists and handle NaN values properly  
+            billing_data['job_created'] = billing_data['job_created'].astype(str)
+            billing_data['job_created'] = pd.to_datetime(billing_data['job_created'], format='ISO8601', errors='coerce').dt.tz_localize(None)
         else:
             billing_data['job_created'] = pd.NaT
         datetime_duration = time.time() - datetime_start
@@ -277,21 +283,48 @@ class DataframeJobhostSummaryUsage(Base):
             },
         )
 
-        group = dataframe.groupby(self.unique_index_columns(), dropna=False).agg(
-            task_runs=('task_runs', 'sum'),
-            host_runs=('host_name', 'count'),
-            first_automation=('created', 'min'),
-            last_automation=('created', 'max'),
-            job_created=('job_created', 'max'),
-            managed_node_type=('managed_node_type', 'min'),
-            managed_node_types_set=('managed_node_type_string', set),
-            # TODO: optimize the aggregation to keep less rows around
-            # job_ids=('inventory_name', set),
-            events=('events', merge_arrays),
-            canonical_facts=('canonical_facts', merge_json_sets),
-            facts=('facts', merge_json_sets),
-            host_names_before_dedup=('host_names_before_dedup', set),
-        )
+        try:
+            group = dataframe.groupby(self.unique_index_columns(), dropna=False).agg(
+                task_runs=('task_runs', 'sum'),
+                host_runs=('host_name', 'count'),
+                first_automation=('created', 'min'),
+                last_automation=('created', 'max'),
+                job_created=('job_created', 'max'),
+                managed_node_type=('managed_node_type', 'min'),
+                managed_node_types_set=('managed_node_type_string', set),
+                # TODO: optimize the aggregation to keep less rows around
+                # job_ids=('inventory_name', set),
+                events=('events', merge_arrays),
+                canonical_facts=('canonical_facts', merge_json_sets),
+                facts=('facts', merge_json_sets),
+                host_names_before_dedup=('host_names_before_dedup', set),
+            )
+        except TypeError as e:
+            if 'not supported between instances' in str(e) and ('float' in str(e) and 'Timestamp' in str(e)):
+                # Handle mixed float/Timestamp data by ensuring proper datetime conversion
+                add_span_attributes(current_span, **{'dataframe.group.datetime_conversion_error': str(e)})
+                
+                # Ensure datetime columns are properly converted before aggregation
+                for col in ['created', 'job_created']:
+                    if col in dataframe.columns:
+                        dataframe[col] = pd.to_datetime(dataframe[col], errors='coerce')
+                
+                # Retry aggregation after datetime conversion
+                group = dataframe.groupby(self.unique_index_columns(), dropna=False).agg(
+                    task_runs=('task_runs', 'sum'),
+                    host_runs=('host_name', 'count'),
+                    first_automation=('created', 'min'),
+                    last_automation=('created', 'max'),
+                    job_created=('job_created', 'max'),
+                    managed_node_type=('managed_node_type', 'min'),
+                    managed_node_types_set=('managed_node_type_string', set),
+                    events=('events', merge_arrays),
+                    canonical_facts=('canonical_facts', merge_json_sets),
+                    facts=('facts', merge_json_sets),
+                    host_names_before_dedup=('host_names_before_dedup', set),
+                )
+            else:
+                raise  # Re-raise if it's a different TypeError
 
         grouped_count = len(group) if group is not None else 0
         result = self.cast_dataframe(group, self.cast_types())
