@@ -1,6 +1,8 @@
 ######################################
 # Code for building the spreadsheet
 ######################################
+import pandas as pd
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -93,8 +95,13 @@ class ReportCCSP(Base):
         events_dataframe = self._fix_event_host_names(job_host_summary_dataframe, events_dataframe)
         scope_dataframe = self.dataframes['main_host']
 
-        directs = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == DIRECT]
-        indirects = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == INDIRECT]
+        # Handle empty dataframes gracefully
+        if job_host_summary_dataframe is None or job_host_summary_dataframe.empty:
+            directs = pd.DataFrame()
+            indirects = pd.DataFrame()
+        else:
+            directs = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == DIRECT]
+            indirects = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == INDIRECT]
 
         # Create the workbook and worksheets
         self.wb.remove(self.wb.active)  # delete the default sheet
@@ -257,7 +264,12 @@ class ReportCCSP(Base):
             bottom=Side(border_style='dotted', color=self.BLACK_COLOR_HEX),
         )
 
-        ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'host_name' not in dataframe.columns:
+            # Create empty dataframe with expected structure for empty case
+            ccsp_report = pd.DataFrame(columns=['organization_name', 'quantity_consumed'])
+        else:
+            ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
         ccsp_report['mark_x'] = ''
         ccsp_report['unit_price'] = round(self.price_per_node, 2)
         ccsp_report['extended_unit_price'] = round((ccsp_report['quantity_consumed'] * ccsp_report['unit_price']), 2)

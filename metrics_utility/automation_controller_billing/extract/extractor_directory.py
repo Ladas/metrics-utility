@@ -1,6 +1,9 @@
 import os
 import tempfile
 
+from datetime import datetime
+from typing import List, Tuple
+
 from metrics_utility.automation_controller_billing.extract.base import Base
 from metrics_utility.logger import logger
 
@@ -43,3 +46,36 @@ class ExtractorDirectory(Base):
     @staticmethod
     def batch_size():
         return 100000
+
+    def scan_tarballs_for_date(self, target_date) -> List[Tuple[str, datetime]]:
+        """
+        Scan for tarballs available for a specific date without extracting them
+
+        Args:
+            target_date: Date to scan for
+
+        Returns:
+            List of tuples (tarball_path, modification_time)
+        """
+        prefix = self.get_path_prefix(target_date)
+        tarballs = []
+
+        try:
+            if not os.path.exists(prefix):
+                logger.debug(f'{self.LOG_PREFIX} Directory {prefix} does not exist for {target_date}')
+                return tarballs
+
+            for filename in os.listdir(prefix):
+                if filename.endswith('.tar.gz'):
+                    tarball_path = os.path.join(prefix, filename)
+                    if os.path.isfile(tarball_path):
+                        # Get modification time
+                        stat_result = os.stat(tarball_path)
+                        modification_time = datetime.fromtimestamp(stat_result.st_mtime)
+                        tarballs.append((tarball_path, modification_time))
+
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            logger.warning(f'{self.LOG_PREFIX} Failed to scan directory {prefix} for {target_date}: {e}')
+
+        logger.debug(f'{self.LOG_PREFIX} Found {len(tarballs)} tarballs for {target_date}')
+        return tarballs

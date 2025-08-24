@@ -3,6 +3,8 @@
 ######################################
 import json
 
+import pandas as pd
+
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -116,6 +118,13 @@ class Base:
         if destination_dataframe is None:
             return None
 
+        # Check for empty dataframes
+        if mapping_dataframe is None or mapping_dataframe.empty:
+            return destination_dataframe
+
+        if destination_dataframe.empty:
+            return destination_dataframe
+
         def concatenate_columns_mapping(row):
             return f'{row["original_host_name"]}__{str(row["install_uuid"])}__{str(row["job_remote_id"])}'
 
@@ -205,6 +214,14 @@ class Base:
     def _build_data_section_infrastructure_summary(self, current_row, ws, dataframe):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
+
+        # Handle invalid dataframes gracefully (but allow empty dataframes with proper columns to proceed)
+        if dataframe is None or 'managed_node_type' not in dataframe.columns:
+            # If no valid dataframe structure, show empty message
+            cell = ws.cell(row=current_row, column=1)
+            cell.value = 'No infrastructure data available'
+            cell.font = value_font
+            return current_row + 1
 
         # Extract infrastructure facts from indirect nodes
         indirect_nodes = dataframe[dataframe['managed_node_type'] == INDIRECT].copy()
@@ -330,23 +347,30 @@ class Base:
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        agg_dict = {
-            'organizations': ('organization_name', 'nunique'),
-            'host_runs': ('host_name', 'count'),
-            'task_runs': ('task_runs', 'sum'),
-            'first_automation': ('first_automation', 'min'),
-            'last_automation': ('last_automation', 'max'),
-            'managed_node_types_set': ('managed_node_types_set', lambda x: merge_arrays(x)),
-            'events': ('events', lambda x: merge_arrays(x)),
-            'canonical_facts': ('canonical_facts', lambda x: merge_json_sets(x)),
-            'facts': ('facts', lambda x: merge_json_sets(x)),
-        }
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'host_name' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(
+                columns=['host_name', 'organizations', 'host_runs', 'task_runs', 'first_automation', 'last_automation']
+            )
+        else:
+            agg_dict = {
+                'organizations': ('organization_name', 'nunique'),
+                'host_runs': ('host_name', 'count'),
+                'task_runs': ('task_runs', 'sum'),
+                'first_automation': ('first_automation', 'min'),
+                'last_automation': ('last_automation', 'max'),
+                'managed_node_types_set': ('managed_node_types_set', lambda x: merge_arrays(x)),
+                'events': ('events', lambda x: merge_arrays(x)),
+                'canonical_facts': ('canonical_facts', lambda x: merge_json_sets(x)),
+                'facts': ('facts', lambda x: merge_json_sets(x)),
+            }
 
-        # Handle deduplication aggregation if enabled
-        self.handle_dedup_aggregation(agg_dict)
+            # Handle deduplication aggregation if enabled
+            self.handle_dedup_aggregation(agg_dict)
 
-        # Now pass this dictionary into .agg()
-        ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(**agg_dict)
+            # Now pass this dictionary into .agg()
+            ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(**agg_dict)
 
         # Convert arrays and dict fields into string, so they can be rendered into xlsx
         convert_cols = ['managed_node_types_set', 'events', 'canonical_facts', 'facts']
@@ -429,18 +453,24 @@ class Base:
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        # Take the content explorer dataframe and extract specific group by
-        agg_dict = {
-            'host_runs_unique': ('host_name', 'nunique'),
-            'host_runs': ('host_composite_id', 'nunique'),
-            'task_runs': ('task_runs', 'sum'),
-            'duration': ('duration', 'sum'),
-        }
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'collection_name' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(columns=['collection_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+        else:
+            # Take the content explorer dataframe and extract specific group by
+            agg_dict = {
+                'host_runs_unique': ('host_name', 'nunique'),
+                'host_runs': ('host_composite_id', 'nunique'),
+                'task_runs': ('task_runs', 'sum'),
+                'duration': ('duration', 'sum'),
+            }
 
-        ccsp_report_dataframe = dataframe.groupby(['collection_name'], dropna=False).agg(**agg_dict)
+            ccsp_report_dataframe = dataframe.groupby(['collection_name'], dropna=False).agg(**agg_dict)
+            # Reset index only for grouped data (collection_name becomes a regular column)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         rename_columns = {
             'collection_name': 'Collection name',
@@ -476,18 +506,24 @@ class Base:
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        # Take the content explorer dataframe and extract specific group by
-        agg_dict = {
-            'host_runs_unique': ('host_name', 'nunique'),
-            'host_runs': ('host_composite_id', 'nunique'),
-            'task_runs': ('task_runs', 'sum'),
-            'duration': ('duration', 'sum'),
-        }
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'role_name' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(columns=['role_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+        else:
+            # Take the content explorer dataframe and extract specific group by
+            agg_dict = {
+                'host_runs_unique': ('host_name', 'nunique'),
+                'host_runs': ('host_composite_id', 'nunique'),
+                'task_runs': ('task_runs', 'sum'),
+                'duration': ('duration', 'sum'),
+            }
 
-        ccsp_report_dataframe = dataframe.groupby(['role_name'], dropna=False).agg(**agg_dict)
+            ccsp_report_dataframe = dataframe.groupby(['role_name'], dropna=False).agg(**agg_dict)
+            # Reset index only for grouped data (role_name becomes a regular column)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         rename_columns = {
             'role_name': 'Role name',
@@ -524,18 +560,24 @@ class Base:
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
-        # Take the content explorer dataframe and extract specific group by
-        agg_dict = {
-            'host_runs_unique': ('host_name', 'nunique'),
-            'host_runs': ('host_composite_id', 'nunique'),
-            'task_runs': ('task_runs', 'sum'),
-            'duration': ('duration', 'sum'),
-        }
+        # Handle empty dataframes gracefully
+        if dataframe is None or dataframe.empty or 'module_name' not in dataframe.columns:
+            # Create empty dataframe with expected columns
+            ccsp_report_dataframe = pd.DataFrame(columns=['module_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+        else:
+            # Take the content explorer dataframe and extract specific group by
+            agg_dict = {
+                'host_runs_unique': ('host_name', 'nunique'),
+                'host_runs': ('host_composite_id', 'nunique'),
+                'task_runs': ('task_runs', 'sum'),
+                'duration': ('duration', 'sum'),
+            }
 
-        ccsp_report_dataframe = dataframe.groupby(['module_name'], dropna=False).agg(**agg_dict)
+            ccsp_report_dataframe = dataframe.groupby(['module_name'], dropna=False).agg(**agg_dict)
+            # Reset index only for grouped data (module_name becomes a regular column)
+            ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = ccsp_report_dataframe.reset_index()
 
         rename_columns = {
             'module_name': 'Module name',

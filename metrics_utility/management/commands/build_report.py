@@ -4,8 +4,9 @@ import os
 from argparse import RawDescriptionHelpFormatter
 
 from django.core.management.base import BaseCommand
+from opentelemetry import trace
 
-from metrics_utility.automation_controller_billing.dataframe_engine.factory import Factory as DataframeFactory
+from metrics_utility.automation_controller_billing.dataframe_engine.rollup_factory import RollupDataframeFactory
 from metrics_utility.automation_controller_billing.dedup.factory import Factory as DedupFactory
 from metrics_utility.automation_controller_billing.extract.factory import Factory as ExtractorFactory
 from metrics_utility.automation_controller_billing.report.factory import Factory as ReportFactory
@@ -23,6 +24,7 @@ from metrics_utility.management.validation import (
     parse_number_of_days,
     validate_build_params,
 )
+from metrics_utility.tracing import SpanAttributes, SpanNames, add_span_attributes, get_tracer, traced_method
 
 
 def get_report_path(ship_path, date):
@@ -118,6 +120,7 @@ class Command(BaseCommand):
         parser.add_argument('--force', dest='force', action='store_true', help=self.help_texts.get('force'))
         parser.add_argument('--verbose', dest='verbose', action='store_true', help=self.help_texts.get('verbose'))
 
+    @traced_method(SpanNames.REPORT_BUILD)
     def handle(self, *args, **options):
         if options.get('verbose'):
             debug()
@@ -125,6 +128,17 @@ class Command(BaseCommand):
         handle_env_validation('build')
 
         opt_since, opt_until = validate_build_params(options, self.help_texts)
+
+        # Add span attributes for report parameters
+        tracer = get_tracer()
+        current_span = trace.get_current_span()
+        add_span_attributes(
+            current_span,
+            **{
+                SpanAttributes.REPORT_SINCE_DATE: opt_since.isoformat() if opt_since else None,
+                SpanAttributes.REPORT_UNTIL_DATE: opt_until.isoformat() if opt_until else None,
+            },
+        )
 
         opt_month, month, next_month = handle_month(options.get('month') or None)
         opt_ephemeral = parse_number_of_days(options.get('ephemeral'))
@@ -140,6 +154,17 @@ class Command(BaseCommand):
         extra_params['month_since'] = month
         extra_params['month_until'] = next_month
         extra_params['deduplicator'] = os.getenv('METRICS_UTILITY_DEDUPLICATOR') or None
+
+        # Add report configuration to span
+        add_span_attributes(
+            current_span,
+            **{
+                SpanAttributes.REPORT_TYPE: extra_params.get('report_type', 'unknown'),
+                'ship.target': ship_target,
+                'ship.path': extra_params.get('ship_path', 'unknown'),
+                'report.force': opt_force,
+            },
+        )
 
         # Determine destination path for generated report and skip processing if it exists
         report_type = extra_params['report_type']
@@ -174,26 +199,93 @@ class Command(BaseCommand):
             )
             return
 
-        extractor = ExtractorFactory(ship_target, extra_params).create()
+        with tracer.start_as_current_span(SpanNames.DATA_EXTRACTION) as extraction_span:
+            add_span_attributes(extraction_span, **{'extraction.ship_target': ship_target})
+            extractor = ExtractorFactory(ship_target, extra_params).create()
 
-        # FIXME move from month to extra_params
-        dataframes = DataframeFactory(extractor=extractor, month=month, extra_params=extra_params).create()
+        # Use rollup dataframe factory with unified data loading (Phase 1)
+        with tracer.start_as_current_span(SpanNames.REPORT_DATAFRAME_FACTORY) as dataframe_span:
+            add_span_attributes(
+                dataframe_span,
+                **{
+                    SpanAttributes.REPORT_TYPE: extra_params.get('report_type', 'unknown'),
+                    'dataframe.loading.method': 'rollup_factory_unified_data_loader',
+                    'dataframe.optimization': 'single_tarball_read',
+                },
+            )
+            dataframe_factory = RollupDataframeFactory(extractor=extractor, month=month, extra_params=extra_params)
+            dataframes = dataframe_factory.create()
 
-        dedup = DedupFactory(dataframes=dataframes, extra_params=extra_params).create()
-        dataframes = dedup.run()
+        with tracer.start_as_current_span(SpanNames.REPORT_DEDUPLICATION) as dedup_span:
+            add_span_attributes(dedup_span, **{'deduplication.algorithm': extra_params.get('deduplicator', 'default')})
+            
+            # Create dataframe instances for deduplication (needed to call dedup methods)
+            dataframe_instances = {}
+            dataframes_by_class_name = {}
+            
+            # Map standard names to class names for deduplication
+            class_name_mapping = {
+                'job_host_summary': 'DataframeJobhostSummaryUsage',
+                'main_jobevent': 'DataframeContentUsage', 
+                'main_host': 'DataframeInventoryScope',
+                'data_collection_status': 'DataframeCollectionStatus'
+            }
+            
+            for df_name, dataframe_data in dataframes.items():
+                if dataframe_data is not None:
+                    class_name = class_name_mapping.get(df_name, df_name)
+                    
+                    # Create dataframe instance
+                    dataframe_class = self._get_dataframe_class_for_dedup(class_name)
+                    if dataframe_class:
+                        dataframe_instances[class_name] = dataframe_class(extractor=extractor, month=month, extra_params=extra_params)
+                        dataframes_by_class_name[class_name] = dataframe_data
+            
+            # Create dedup factory and pass DataFrames keyed by class names
+            dedup = DedupFactory(dataframes=dataframes_by_class_name, extra_params=extra_params).create()
+            
+            # Set up the deduplicator with both the actual DataFrames and the instances
+            dedup.dataframes = dataframes_by_class_name
+            dedup.dataframe_instances = dataframe_instances
+            
+            deduplicated_dataframes = dedup.run()
+            
+            # Map deduplicated results back to standard names for reports
+            reverse_mapping = {v: k for k, v in class_name_mapping.items()}
+            dataframes = {}
+            for class_name, deduped_df in deduplicated_dataframes.items():
+                standard_name = reverse_mapping.get(class_name, class_name)
+                dataframes[standard_name] = deduped_df
 
-        if all(dataframe is None or dataframe.empty for _name, dataframe in dataframes.items()):
+        # Check if we have any data, but allow partial reports
+        non_empty_dataframes = [df for df in dataframes.values() if df is not None and not df.empty]
+        if not non_empty_dataframes:
             if opt_since is not None:
-                logger.info(f'No billing data for input date range {since_date}--{until_date}')
+                logger.warning(f'No billing data found for input date range {since_date}--{until_date}')
+                logger.warning('All dataframes are empty - this may indicate missing data or configuration issues')
             else:
-                logger.info(f'No billing data for month {opt_month}')
-            return
+                logger.warning(f'No billing data found for month {opt_month}')
+                logger.warning('All dataframes are empty - this may indicate missing data or configuration issues')
+        else:
+            logger.info(f'Found data in {len(non_empty_dataframes)} out of {len(dataframes)} dataframes')
+            if len(non_empty_dataframes) < len(dataframes):
+                missing_dataframes = [name for name, df in dataframes.items() if df is None or (hasattr(df, 'empty') and df.empty)]
+                logger.info(f'Some dataframes have no data: {missing_dataframes}')
+                logger.info('Generating report with available data')
 
-        report_engine = ReportFactory(dataframes=dataframes, extra_params=extra_params).create()
-        report_spreadsheet = report_engine.build_spreadsheet()
+        with tracer.start_as_current_span(SpanNames.REPORT_SHEET_GENERATION) as sheet_span:
+            add_span_attributes(sheet_span, **{'report.dataframe_count': len([df for df in dataframes.values() if df is not None and not df.empty])})
+            report_engine = ReportFactory(dataframes=dataframes, extra_params=extra_params).create()
+            report_spreadsheet = report_engine.build_spreadsheet()
 
         # Save the report to the configured destination
-        report_saver_engine.save(report_spreadsheet)
+        with tracer.start_as_current_span(SpanNames.REPORT_XLSX_SAVE) as save_span:
+            add_span_attributes(save_span, **{SpanAttributes.REPORT_OUTPUT_PATH: report_saver_engine.report_spreadsheet_destination_path})
+            report_saver_engine.save(report_spreadsheet)
+
+        # Add final report metrics to main span
+        add_span_attributes(current_span, **{SpanAttributes.REPORT_OUTPUT_PATH: report_saver_engine.report_spreadsheet_destination_path})
+
         logger.info(f'Report generated into {ship_target}: {report_saver_engine.report_spreadsheet_destination_path}')
 
     def _handle_ship_target(self, ship_target):
@@ -227,6 +319,12 @@ class Command(BaseCommand):
             {
                 'report_type': report_type,
                 'price_per_node': price_per_node,
+                'optional_sheets': os.getenv(
+                    'METRICS_UTILITY_OPTIONAL_CCSP_REPORT_SHEETS',
+                    'ccsp_summary,managed_nodes,usage_by_organizations,usage_by_collections,usage_by_roles,usage_by_modules',
+                )
+                .rstrip(',')
+                .split(','),
                 # XLSX specific params
                 'report_sku': os.getenv('METRICS_UTILITY_REPORT_SKU', ''),
                 'report_sku_description': os.getenv('METRICS_UTILITY_REPORT_SKU_DESCRIPTION', ''),
@@ -254,3 +352,23 @@ class Command(BaseCommand):
             }
         )
         return base
+
+    def _get_dataframe_class_for_dedup(self, class_name):
+        """Get the dataframe class for deduplication instance creation"""
+        try:
+            if class_name == 'DataframeJobhostSummaryUsage':
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_jobhost_summary_usage import DataframeJobhostSummaryUsage
+                return DataframeJobhostSummaryUsage
+            elif class_name == 'DataframeContentUsage':
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_content_usage import DataframeContentUsage
+                return DataframeContentUsage
+            elif class_name == 'DataframeInventoryScope':
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope import DataframeInventoryScope
+                return DataframeInventoryScope
+            elif class_name == 'DataframeCollectionStatus':
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_collection_status import DataframeCollectionStatus
+                return DataframeCollectionStatus
+            else:
+                return None
+        except ImportError:
+            return None
