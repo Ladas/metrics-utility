@@ -1,7 +1,7 @@
 ######################################
 # Code for building the spreadsheet
 ######################################
-import pandas as pd
+import polars as pd
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -96,12 +96,24 @@ class ReportCCSP(Base):
         scope_dataframe = self.dataframes['main_host']
 
         # Handle empty dataframes gracefully
-        if job_host_summary_dataframe is None or job_host_summary_dataframe.empty:
+        if job_host_summary_dataframe is None or len(job_host_summary_dataframe) == 0:
             directs = pd.DataFrame()
             indirects = pd.DataFrame()
         else:
-            directs = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == DIRECT]
-            indirects = job_host_summary_dataframe[job_host_summary_dataframe['managed_node_type'] == INDIRECT]
+            # Use Polars-compatible filtering syntax
+            direct_filter = job_host_summary_dataframe['managed_node_type'] == DIRECT
+            indirect_filter = job_host_summary_dataframe['managed_node_type'] == INDIRECT
+            
+            directs = (
+                job_host_summary_dataframe.filter(direct_filter)
+                if hasattr(job_host_summary_dataframe, 'filter')
+                else job_host_summary_dataframe[direct_filter]
+            )
+            indirects = (
+                job_host_summary_dataframe.filter(indirect_filter)
+                if hasattr(job_host_summary_dataframe, 'filter')
+                else job_host_summary_dataframe[indirect_filter]
+            )
 
         # Create the workbook and worksheets
         self.wb.remove(self.wb.active)  # delete the default sheet
@@ -265,22 +277,31 @@ class ReportCCSP(Base):
         )
 
         # Handle empty dataframes gracefully
-        if dataframe is None or dataframe.empty or 'host_name' not in dataframe.columns:
+        if dataframe is None or len(dataframe) == 0 or 'host_name' not in dataframe.columns:
             # Create empty dataframe with expected structure for empty case
             ccsp_report = pd.DataFrame(columns=['organization_name', 'quantity_consumed'])
         else:
-            ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
+            # Use Polars-compatible groupby
+            if hasattr(dataframe, 'group_by'):  # Polars DataFrame
+                ccsp_report = dataframe.group_by('organization_name').agg([
+                    pd.col('host_name').n_unique().alias('quantity_consumed')
+                ])
+            else:  # pandas DataFrame fallback
+                ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
         ccsp_report['mark_x'] = ''
         ccsp_report['unit_price'] = round(self.price_per_node, 2)
         ccsp_report['extended_unit_price'] = round((ccsp_report['quantity_consumed'] * ccsp_report['unit_price']), 2)
 
-        # order the columns right
-        ccsp_report = ccsp_report.reset_index()
-        ccsp_report = ccsp_report.reindex(columns=['organization_name', 'mark_x', 'quantity_consumed', 'unit_price', 'extended_unit_price'])
+        # order the columns right - use select for Polars compatibility
+        if hasattr(ccsp_report, 'select'):  # Polars DataFrame
+            ccsp_report = ccsp_report.select(['organization_name', 'mark_x', 'quantity_consumed', 'unit_price', 'extended_unit_price'])
+        else:  # pandas DataFrame fallback
+            ccsp_report = ccsp_report.reset_index()
+            ccsp_report = ccsp_report.reindex(columns=['organization_name', 'mark_x', 'quantity_consumed', 'unit_price', 'extended_unit_price'])
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = ccsp_report.rename(
-            columns={
+        ccsp_report_dataframe = self.rename_dataframe(ccsp_report, 
+            {
                 'organization_name': 'Organization name (i.e. company name)',
                 'mark_x': "Please Mark With An 'X' If The Usage Is Internal. \nOtherwise Leave Blank",
                 'quantity_consumed': 'Red Hat SKU\n Quantity Consumed',
@@ -290,7 +311,7 @@ class ReportCCSP(Base):
         )
 
         row_counter = 0
-        rows = dataframe_to_rows(ccsp_report_dataframe, index=False)
+        rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
         for r_idx, row in enumerate(rows, current_row):
             for c_idx, value in enumerate(row, 1):
                 cell = ws.cell(row=r_idx, column=c_idx)

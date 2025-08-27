@@ -1,6 +1,6 @@
 import datetime
 
-import pandas as pd
+import polars as pd
 
 from django.db import connection
 

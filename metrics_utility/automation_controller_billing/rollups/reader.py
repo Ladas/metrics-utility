@@ -5,7 +5,7 @@ import os
 from datetime import date, timedelta
 from typing import Dict, List
 
-import pandas as pd
+import polars as pl
 
 from opentelemetry import trace
 
@@ -102,7 +102,7 @@ class RollupReader:
         return True
 
     @traced_method('rollup.reader.load_dataframes')
-    def load_rollup_dataframes(self, since_date: date, until_date: date, required_dataframes: List[str]) -> Dict[str, pd.DataFrame]:
+    def load_rollup_dataframes(self, since_date: date, until_date: date, required_dataframes: List[str]) -> Dict[str, pl.DataFrame]:
         """
         Load and merge rollup dataframes for the specified date range using latest versions
 
@@ -112,7 +112,7 @@ class RollupReader:
             required_dataframes: List of dataframe names to load (supports both factory and class names)
 
         Returns:
-            Dictionary mapping original dataframe names to merged pandas DataFrames (None if no data available)
+            Dictionary mapping original dataframe names to merged Polars DataFrames (None if no data available)
         """
         if not self.can_use_rollups(since_date, until_date, required_dataframes):
             raise ValueError('Cannot use rollups for the specified date range and dataframes')
@@ -191,7 +191,9 @@ class RollupReader:
                     if os.path.exists(parquet_path):
                         try:
                             # Load parquet data directly - minimal processing to avoid corruption
-                            df = pd.read_parquet(parquet_path)
+                            # Use Polars for consistency with the rest of the codebase
+                            import polars as pl
+                            df = pl.read_parquet(parquet_path)
                             
                             # Only do minimal transformations for specific dataframes
                             if df_name == 'DataframeJobhostSummaryUsage':
@@ -233,7 +235,7 @@ class RollupReader:
         total_error_dates = 0
 
         for df_name, df in merged_dataframes.items():
-            if df is not None and not df.empty:
+            if df is not None and len(df) > 0:
                 record_count = len(df)
                 total_records += record_count
                 loaded_dataframes += 1
@@ -277,13 +279,9 @@ class RollupReader:
         # NO regrouping here - it over-aggregates and loses unique records
         result_dataframes_normalized = {}
         for df_name, dataframe in merged_dataframes.items():
-            if dataframe is not None and not dataframe.empty:
-                # Only reset index if we have a MultiIndex (named levels)
-                if dataframe.index.names != [None]:  # Has named index levels (MultiIndex)
-                    dataframe = dataframe.reset_index()
-                    self.logger.debug(f'Loaded {df_name}: {len(dataframe)} records (index reset for MultiIndex compatibility)')
-                else:
-                    self.logger.debug(f'Loaded {df_name}: {len(dataframe)} records (ready for dedup/report processing)')
+            if dataframe is not None and len(dataframe) > 0:
+                # Polars DataFrames don't have indexes, so no index manipulation needed
+                self.logger.debug(f'Loaded {df_name}: {len(dataframe)} records (ready for dedup/report processing)')
                 result_dataframes_normalized[df_name] = dataframe
             else:
                 result_dataframes_normalized[df_name] = dataframe
@@ -298,7 +296,7 @@ class RollupReader:
 
         return result_dataframes
 
-    def _convert_lists_to_sets(self, df: pd.DataFrame, dataframe_name: str) -> pd.DataFrame:
+    def _convert_lists_to_sets(self, df: pl.DataFrame, dataframe_name: str) -> pl.DataFrame:
         """Convert lists back to sets for known set columns after loading from parquet.
         
         When storing to parquet, sets are converted to sorted lists. This method converts them back.
@@ -328,13 +326,15 @@ class RollupReader:
                     else:
                         return x
                 
-                df[col] = df[col].apply(convert_to_set)
+                df = df.with_columns(
+                    df[col].map_elements(convert_to_set, return_dtype=pl.Object).alias(col)
+                )
         
         return df
 
-    def _normalize_dataframe_types(self, df: pd.DataFrame, dataframe_name: str) -> pd.DataFrame:
+    def _normalize_dataframe_types(self, df: pl.DataFrame, dataframe_name: str) -> pl.DataFrame:
         """Normalize dataframe types after loading from parquet (convert JSON back to dicts/sets and handle complex types)"""
-        df_normalized = df.copy()
+        df_normalized = df.clone()
 
         import numpy as np
 
@@ -350,37 +350,65 @@ class RollupReader:
 
         # Handle JSON fields that were serialized for parquet storage - only for specified columns
         for col in json_columns:
-            if col in df_normalized.columns and df_normalized[col].dtype == 'object':
+            if col in df_normalized.columns and str(df_normalized[col].dtype) in ['Utf8', 'String', 'Object']:
                 # Check if this might be a JSON column
-                sample_val = df_normalized[col].dropna().iloc[0] if not df_normalized[col].dropna().empty else None
+                non_null_values = df_normalized[col].drop_nulls()
+                if len(non_null_values) > 0:
+                    sample_val = non_null_values[0]
+                else:
+                    sample_val = None
 
                 if isinstance(sample_val, str) and sample_val.strip().startswith(('{', '[')):
                     try:
-                        # Try to parse as JSON
-                        df_normalized[col] = df_normalized[col].apply(lambda x: json.loads(x) if x is not None and x != '' else None)
+                        # Try to parse as JSON using Polars
+                        import json
+                        def parse_json(x):
+                            if x is not None and x != '':
+                                try:
+                                    return json.loads(x)
+                                except (json.JSONDecodeError, TypeError):
+                                    return None
+                            return None
+                        
+                        df_normalized = df_normalized.with_columns(
+                            df_normalized[col].map_elements(parse_json, return_dtype=pl.Object).alias(col)
+                        )
 
                         # Special handling for canonical_facts and facts columns
                         if col in ['canonical_facts', 'facts']:
-                            df_normalized[col] = df_normalized[col].apply(
-                                lambda x: self._normalize_canonical_facts_dict(x) if x is not None else None
+                            def normalize_facts(x):
+                                return self._normalize_canonical_facts_dict(x) if x is not None else None
+                            
+                            df_normalized = df_normalized.with_columns(
+                                df_normalized[col].map_elements(normalize_facts, return_dtype=pl.Object).alias(col)
                             )
 
-                    except (json.JSONDecodeError, TypeError):
+                    except Exception:
                         # If JSON parsing fails, keep original values
                         pass
 
         # Handle numpy arrays and complex iterables for ALL columns (but safely)
         for col in df_normalized.columns:
-            if df_normalized[col].dtype == 'object':
-                sample_val = df_normalized[col].dropna().iloc[0] if not df_normalized[col].dropna().empty else None
+            if str(df_normalized[col].dtype) == 'Object':
+                non_null_values = df_normalized[col].drop_nulls()
+                if len(non_null_values) > 0:
+                    sample_val = non_null_values[0]
+                else:
+                    sample_val = None
                 
                 if isinstance(sample_val, np.ndarray):
                     # Convert numpy arrays to lists for Excel compatibility
-                    df_normalized[col] = df_normalized[col].apply(lambda x: x.tolist() if x is not None and hasattr(x, 'tolist') else x)
+                    def convert_numpy(x):
+                        return x.tolist() if x is not None and hasattr(x, 'tolist') else x
+                    df_normalized = df_normalized.with_columns(
+                        df_normalized[col].map_elements(convert_numpy, return_dtype=pl.Object).alias(col)
+                    )
                 elif hasattr(sample_val, '__iter__') and not isinstance(sample_val, (str, bytes, dict)):
                     # Convert other complex iterables to simple types (but not strings or dicts)
-                    df_normalized[col] = df_normalized[col].apply(
-                        lambda x: list(x) if x is not None and hasattr(x, '__iter__') and not isinstance(x, (str, bytes, dict)) else x
+                    def convert_iterable(x):
+                        return list(x) if x is not None and hasattr(x, '__iter__') and not isinstance(x, (str, bytes, dict)) else x
+                    df_normalized = df_normalized.with_columns(
+                        df_normalized[col].map_elements(convert_iterable, return_dtype=pl.Object).alias(col)
                     )
 
         return df_normalized

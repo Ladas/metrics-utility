@@ -243,7 +243,7 @@ class RollupDataframeFactory:
 
             # Store rollups for each dataframe using correct RollupManager method names
             for dataframe_name, dataframe in dataframes.items():
-                if dataframe is not None and not dataframe.empty:
+                if dataframe is not None and len(dataframe) > 0:
                     records_processed = len(dataframe)
                     rollup_manager.save_rollup_data(target_date, dataframe_name, dataframe, records_processed, processing_time)
                     self.logger.info(f'✓ Stored rollup for {dataframe_name} on {target_date} with {records_processed} records')
@@ -285,14 +285,24 @@ class RollupDataframeFactory:
                 # Build dataframe for this batch
                 batch_result = dataframe_instance.build_dataframe(iter(single_batch_iterator))
                 
-                if batch_result is not None and not batch_result.empty:
+                if batch_result is not None and len(batch_result) > 0:
                     self.logger.info(f'Got {len(batch_result)} records for {dataframe_name} from batch {batch_count}')
                 
                 # Merge with accumulated results
                 if result_dataframes[dataframe_name] is None:
                     result_dataframes[dataframe_name] = batch_result
-                elif batch_result is not None and not batch_result.empty:
-                    result_dataframes[dataframe_name] = dataframe_instance.merge(result_dataframes[dataframe_name], batch_result)
+                elif batch_result is not None and len(batch_result) > 0:
+                    # Debug schema before merge to identify vstack issues
+                    existing_df = result_dataframes[dataframe_name]
+                    self.logger.info(f'ROLLUP DEBUG: Merging {dataframe_name} - existing: {existing_df.columns if existing_df is not None else None}')
+                    self.logger.info(f'ROLLUP DEBUG: Merging {dataframe_name} - new batch: {batch_result.columns if batch_result is not None else None}')
+                    
+                    try:
+                        result_dataframes[dataframe_name] = dataframe_instance.merge(existing_df, batch_result)
+                        self.logger.info(f'ROLLUP DEBUG: Successfully merged {dataframe_name}')
+                    except Exception as merge_error:
+                        self.logger.error(f'ROLLUP DEBUG: Merge failed for {dataframe_name}: {merge_error}')
+                        raise merge_error
         
         self.logger.info(f'Processed {batch_count} batches for {target_date}')
         
@@ -539,7 +549,7 @@ class RollupDataframeFactory:
         class_to_instance = {}
 
         for table_name, df in table_dataframes.items():
-            if df is None or (hasattr(df, 'empty') and df.empty):
+            if df is None or len(df) == 0:
                 continue
 
             dataframe_class = table_to_class.get(table_name)
@@ -583,8 +593,8 @@ class RollupDataframeFactory:
                 accumulated[class_name] = daily_df
             else:
                 # Merge using dataframe's merge method
-                if daily_df is not None and not daily_df.empty:
-                    if accumulated[class_name] is None or (hasattr(accumulated[class_name], 'empty') and accumulated[class_name].empty):
+                if daily_df is not None and len(daily_df) > 0:
+                    if accumulated[class_name] is None or len(accumulated[class_name]) == 0:
                         accumulated[class_name] = daily_df
                     else:
                         # Get the dataframe class from class name

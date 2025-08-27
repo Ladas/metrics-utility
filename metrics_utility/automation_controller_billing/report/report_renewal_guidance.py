@@ -4,7 +4,7 @@
 import datetime
 import time
 
-import pandas as pd
+import polars as pd
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -228,15 +228,15 @@ class ReportRenewalGuidance(Base):
         ccsp_report = ccsp_report.reindex(columns=['description', 'quantity_consumed'])
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = ccsp_report.rename(
-            columns={
+        ccsp_report_dataframe = self.rename_dataframe(ccsp_report, 
+            {
                 'description': 'Description',
                 'quantity_consumed': 'Quantity',
             }
         )
 
         row_counter = 0
-        rows = dataframe_to_rows(ccsp_report_dataframe, index=False)
+        rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
         for r_idx, row in enumerate(rows, current_row):
             if row_counter == 0:
                 rd = ws.row_dimensions[r_idx]
@@ -294,8 +294,8 @@ class ReportRenewalGuidance(Base):
             ]
         )
 
-        ccsp_report_dataframe = ccsp_report_dataframe.rename(
-            columns={
+        ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, 
+            {
                 'hostname': 'Host name',
                 'first_automation': 'First\nautomation',
                 'last_automation': 'Last\nautomation',
@@ -314,7 +314,7 @@ class ReportRenewalGuidance(Base):
         )
 
         row_counter = 0
-        rows = dataframe_to_rows(ccsp_report_dataframe, index=False)
+        rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
         for r_idx, row in enumerate(rows, current_row):
             for c_idx, value in enumerate(row, 1):
                 cell = ws.cell(row=r_idx, column=c_idx)
@@ -347,8 +347,8 @@ class ReportRenewalGuidance(Base):
             ]
         )
 
-        ccsp_report_dataframe = ccsp_report_dataframe.rename(
-            columns={
+        ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, 
+            {
                 'window_start': 'Start of the\nephemeral window',
                 'window_end': 'End of the\nephemeral window',
                 'ephemeral_hosts': 'Ephemeral automated hosts',
@@ -356,7 +356,7 @@ class ReportRenewalGuidance(Base):
         )
 
         row_counter = 0
-        rows = dataframe_to_rows(ccsp_report_dataframe, index=False)
+        rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
         for r_idx, row in enumerate(rows, current_row):
             for c_idx, value in enumerate(row, 1):
                 cell = ws.cell(row=r_idx, column=c_idx)

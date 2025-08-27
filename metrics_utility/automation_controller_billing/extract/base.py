@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import List, Tuple
 
-import pandas as pd
+import polars as pd
 
 from opentelemetry import trace
 
@@ -105,7 +105,7 @@ class Base:
             with trace.get_tracer(__name__).start_as_current_span('csv.processing.data_collection_status') as csv_span:
                 df = self.build_data_batch(temp_dir, 'data_collection_status')
                 needed_data['data_collection_status'] = df
-                records = len(df) if df is not None and not df.empty else 0
+                records = len(df) if df is not None and len(df) > 0 else 0
                 total_records += records
                 processed_csvs.append('data_collection_status')
                 add_span_attributes(csv_span, **{'csv.name': 'data_collection_status', 'csv.records': records})
@@ -114,7 +114,7 @@ class Base:
             with trace.get_tracer(__name__).start_as_current_span('csv.processing.job_host_summary') as csv_span:
                 df = self.build_data_batch(temp_dir, 'job_host_summary')
                 needed_data['job_host_summary'] = df
-                records = len(df) if df is not None and not df.empty else 0
+                records = len(df) if df is not None and len(df) > 0 else 0
                 total_records += records
                 processed_csvs.append('job_host_summary')
                 add_span_attributes(csv_span, **{'csv.name': 'job_host_summary', 'csv.records': records})
@@ -123,7 +123,7 @@ class Base:
             with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_indirectmanagednodeaudit') as csv_span:
                 df = self.build_data_batch(temp_dir, 'main_indirectmanagednodeaudit')
                 needed_data['indirect_nodes'] = df
-                records = len(df) if df is not None and not df.empty else 0
+                records = len(df) if df is not None and len(df) > 0 else 0
                 total_records += records
                 processed_csvs.append('main_indirectmanagednodeaudit')
                 add_span_attributes(csv_span, **{'csv.name': 'main_indirectmanagednodeaudit', 'csv.records': records})
@@ -132,7 +132,7 @@ class Base:
             with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_jobevent') as csv_span:
                 df = self.build_data_batch(temp_dir, 'main_jobevent')
                 needed_data['main_jobevent'] = df
-                records = len(df) if df is not None and not df.empty else 0
+                records = len(df) if df is not None and len(df) > 0 else 0
                 total_records += records
                 processed_csvs.append('main_jobevent')
                 add_span_attributes(csv_span, **{'csv.name': 'main_jobevent', 'csv.records': records})
@@ -141,7 +141,7 @@ class Base:
             with trace.get_tracer(__name__).start_as_current_span('csv.processing.main_host') as csv_span:
                 df = self.build_data_batch(temp_dir, 'main_host')
                 needed_data['main_host'] = df
-                records = len(df) if df is not None and not df.empty else 0
+                records = len(df) if df is not None and len(df) > 0 else 0
                 total_records += records
                 processed_csvs.append('main_host')
                 add_span_attributes(csv_span, **{'csv.name': 'main_host', 'csv.records': records})

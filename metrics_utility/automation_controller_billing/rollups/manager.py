@@ -663,45 +663,42 @@ class RollupManager:
             self.logger.warning(f'Dataframe for {dataframe_name} is None - no data available')
             return self.save_no_data_metadata(target_date, dataframe_name)
 
-        if df.empty:
+        if len(df) == 0:
             self.logger.warning(f'Dataframe for {dataframe_name} is empty - no data available')
             return self.save_no_data_metadata(target_date, dataframe_name)
 
-        # Optimize data types for parquet storage
-        df_for_parquet = df.copy()
+        # Polars-compatible parquet storage
+        import json
+        df_for_parquet = df.clone()
         
-        # Reset index to ensure all unique_index_columns are stored as regular columns in parquet
-        # This is critical for rollup loading - without this, index columns are lost and records get incorrectly merged
-        if df_for_parquet.index.names != [None]:  # Has named index (MultiIndex or single named index)
-            df_for_parquet = df_for_parquet.reset_index()
-        else:
-            # For default integer index, just drop it completely to avoid spurious 'index' column
-            df_for_parquet = df_for_parquet.reset_index(drop=True)
-
-        # Handle complex data types
-        import numpy as np
-
-        for col in df_for_parquet.columns:
-            if df_for_parquet[col].dtype == 'object':
-                sample_val = df_for_parquet[col].dropna().iloc[0] if not df_for_parquet[col].dropna().empty else None
-
-                if isinstance(sample_val, dict):
-                    df_for_parquet[col] = df_for_parquet[col].apply(lambda x: json.dumps(x, default=str) if x is not None else None)
-                elif isinstance(sample_val, set):
-                    # Filter out None values before sorting to avoid comparison errors
-                    df_for_parquet[col] = df_for_parquet[col].apply(
-                        lambda x: sorted([item for item in x if item is not None]) if x is not None else None
+        # NOTE: Polars DataFrames don't have pandas-style indexes, so no need to reset_index
+        # This simplifies the code significantly compared to pandas
+        
+        # For now, save the Polars DataFrame directly to parquet
+        # Polars handles complex data types better than pandas for parquet storage
+        try:
+            df_for_parquet.write_parquet(parquet_path)
+        except Exception as e:
+            # If direct parquet write fails, try to convert problematic types to strings
+            self.logger.warning(f'Direct parquet write failed for {dataframe_name}, attempting type conversion: {e}')
+            
+            # Convert any remaining complex types to JSON strings for parquet compatibility
+            import polars as pl
+            
+            for col in df_for_parquet.columns:
+                # Check if column contains complex types that parquet can't handle
+                dtype_str = str(df_for_parquet[col].dtype)
+                if 'List' in dtype_str or 'Struct' in dtype_str or 'Object' in dtype_str:
+                    # Convert complex types to JSON strings with proper return type
+                    df_for_parquet = df_for_parquet.with_columns(
+                        df_for_parquet[col].map_elements(
+                            lambda x: json.dumps(x, default=str) if x is not None else None,
+                            return_dtype=pl.Utf8
+                        ).alias(col)
                     )
-                elif isinstance(sample_val, np.ndarray):
-                    df_for_parquet[col] = df_for_parquet[col].apply(lambda x: x.tolist() if x is not None and hasattr(x, 'tolist') else x)
-                elif hasattr(sample_val, '__iter__') and not isinstance(sample_val, (str, bytes)):
-                    # Handle other iterable types (lists, tuples, etc.)
-                    df_for_parquet[col] = df_for_parquet[col].apply(
-                        lambda x: list(x) if x is not None and hasattr(x, '__iter__') and not isinstance(x, (str, bytes)) else x
-                    )
-
-        # Save parquet file
-        df_for_parquet.to_parquet(parquet_path, index=False)
+            
+            # Try parquet write again with converted types
+            df_for_parquet.write_parquet(parquet_path)
 
         # Save a simple metadata file in the version directory for debugging/info
         metadata = {

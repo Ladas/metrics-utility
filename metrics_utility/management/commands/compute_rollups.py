@@ -153,7 +153,31 @@ class Command(BaseCommand):
         self.logger.info(f'Created execution plan with {len(smart_plan)} date groups')
         self._display_smart_execution_plan(smart_plan)
 
+        print("DEBUG: About to execute smart plan...")
         self._execute_smart_plan(rollup_manager, smart_plan, extractor, extra_params)
+        print("DEBUG: Smart plan execution completed!")
+        
+        # Ensure all spans are properly closed and tracing resources are cleaned up
+        print("DEBUG: Cleaning up tracing resources...")
+        try:
+            # Get current span and ensure it's ended properly
+            current_span = trace.get_current_span()
+            if current_span and hasattr(current_span, 'end'):
+                print("DEBUG: Ending current span...")
+                # Don't manually end the span - let the context manager handle it
+                pass
+            
+            # Force flush any pending spans
+            tracer_provider = trace.get_tracer_provider()
+            if hasattr(tracer_provider, 'force_flush'):
+                print("DEBUG: Force flushing tracer provider...")
+                tracer_provider.force_flush(timeout_millis=1000)
+                print("DEBUG: Tracer provider flush completed!")
+        except Exception as e:
+            print(f"DEBUG: Error during tracing cleanup: {e}")
+        
+        print("DEBUG: compute_rollups handle method completed successfully!")
+        return
 
     def _validate_date_params(self, options):
         """Validate and parse date parameters"""
@@ -234,6 +258,7 @@ class Command(BaseCommand):
             target_date = date_group['date']
             dataframes = date_group['dataframes']
 
+            print(f"DEBUG: Starting date group {idx}/{total_date_groups} for {target_date}")
             self.logger.info(f'Executing date group {idx}/{total_date_groups}: {len(dataframes)} dataframes for {target_date}')
             self.logger.info(f'  Dataframes: {", ".join(dataframes)}')
 
@@ -242,8 +267,10 @@ class Command(BaseCommand):
                 from metrics_utility.automation_controller_billing.rollups.manager import BatchRollupTask
 
                 batch_task = BatchRollupTask(target_date=target_date, dataframe_names=dataframes, max_priority=0)
+                print(f"DEBUG: About to call _compute_rollup_for_batch_task for {target_date}")
 
                 batch_results = self._compute_rollup_for_batch_task(rollup_manager, batch_task, extractor, extra_params)
+                print(f"DEBUG: _compute_rollup_for_batch_task returned for {target_date}: {batch_results}")
                 successful_date_groups += 1
 
                 # Count individual dataframe successes/failures
@@ -286,9 +313,12 @@ class Command(BaseCommand):
             },
         )
 
+        print("DEBUG: About to log final completion message...")
         self.logger.info(
             f'Rollup computation completed. {successful_dataframes} successful, {failed_dataframes} failed out of {total_dataframes} dataframes in {successful_date_groups}/{total_date_groups} date groups.'
         )
+        print("DEBUG: Final completion message logged, _execute_smart_plan method completing!")
+        return
 
     def _display_smart_execution_plan(self, smart_plan):
         """Display the execution plan for rollup tasks"""
@@ -452,6 +482,7 @@ class Command(BaseCommand):
                 },
             )
 
+            print(f"DEBUG: _compute_rollup_for_batch_task completed for {target_date} with {successful_count}/{len(dataframe_names)} successful dataframes")
             return batch_results
 
     def _handle_ship_target(self, ship_target):

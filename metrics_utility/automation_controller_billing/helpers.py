@@ -2,11 +2,11 @@ import json
 
 from itertools import chain
 
-import pandas as pd
+import polars as pd
 
 
 def parse_json_array(x):
-    if pd.isnull(x):
+    if x is None:
         return []
     try:
         parsed = json.loads(x)

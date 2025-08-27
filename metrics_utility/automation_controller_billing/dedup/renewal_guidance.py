@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pd
 
 
 class BaseDedupRenewal:
@@ -10,14 +10,20 @@ class BaseDedupRenewal:
 
     def _cleanup_null_values(self):
         """Clean up null-like values in key fields."""
-        # Cleanup ansible_host_variable
-        self.dataframe['ansible_host_variable'] = self.dataframe['ansible_host_variable'].replace('', None)
+        # Cleanup ansible_host_variable - Use Polars with_columns
+        self.dataframe = self.dataframe.with_columns(
+            self.dataframe['ansible_host_variable'].str.replace('', None).alias('ansible_host_variable')
+        )
 
-        # Cleanup ansible_product_serial
-        self.dataframe['ansible_product_serial'] = self.dataframe['ansible_product_serial'].replace('NA', None).replace('', None)
+        # Cleanup ansible_product_serial - Use Polars with_columns  
+        self.dataframe = self.dataframe.with_columns(
+            self.dataframe['ansible_product_serial'].str.replace('NA', None).str.replace('', None).alias('ansible_product_serial')
+        )
 
-        # Cleanup ansible_machine_id
-        self.dataframe['ansible_machine_id'] = self.dataframe['ansible_machine_id'].replace('NA', None).replace('', None)
+        # Cleanup ansible_machine_id - Use Polars with_columns
+        self.dataframe = self.dataframe.with_columns(
+            self.dataframe['ansible_machine_id'].str.replace('NA', None).str.replace('', None).alias('ansible_machine_id')
+        )
 
     def _get_latest_hostname(self, dupes):
         """Get the latest non-deleted hostname to represent the duplicate group."""
@@ -66,13 +72,24 @@ class DedupRenewal(BaseDedupRenewal):
         deduped_list = []
         processed_dupes_index = set()
 
-        for index, row in self.dataframe.iterrows():
+        # Handle both pandas and polars DataFrame iteration methods
+        if hasattr(self.dataframe, 'iter_rows'):  # Polars DataFrame
+            iterator = enumerate(self.dataframe.iter_rows(named=True))
+        else:  # pandas DataFrame fallback
+            iterator = self.dataframe.iterrows()
+
+        for index, row in iterator:
             # Skip if index is in existing dupes_index
             if index in processed_dupes_index:
                 continue
 
-            # Start with hostname matches
-            dupes = self.dataframe[self.dataframe['hostname'] == row['hostname']]
+            # Start with hostname matches using Polars-compatible syntax
+            hostname_filter = self.dataframe['hostname'] == row['hostname']
+            dupes = (
+                self.dataframe.filter(hostname_filter)
+                if hasattr(self.dataframe, 'filter')
+                else self.dataframe[hostname_filter]
+            )
 
             # Iterative search to cover indirect relationships
             iterations = int(self.extra_params['report_renewal_guidance_dedup_iterations'])
@@ -115,32 +132,51 @@ class DedupRenewalHostname(BaseDedupRenewal):
 
         # Ensure required columns exist
         if 'ansible_host_variable' not in self.dataframe.columns:
-            self.dataframe['ansible_host_variable'] = None
+            self.dataframe = self.dataframe.with_columns(pd.lit(None).alias('ansible_host_variable'))
 
         self._cleanup_null_values()
 
         # Apply hostname normalization logic similar to CCSP:
         # ansible_host_variable || hostname
-        self.dataframe['normalized_hostname'] = self.dataframe['ansible_host_variable'].fillna(self.dataframe['hostname'])
+        self.dataframe = self.dataframe.with_columns(
+            self.dataframe['ansible_host_variable'].fill_null(self.dataframe['hostname']).alias('normalized_hostname')
+        )
 
         deduped_list = []
         processed_dupes_index = set()
 
-        for index, row in self.dataframe.iterrows():
+        # Handle both pandas and polars DataFrame iteration methods
+        if hasattr(self.dataframe, 'iter_rows'):  # Polars DataFrame
+            iterator = enumerate(self.dataframe.iter_rows(named=True))
+        else:  # pandas DataFrame fallback
+            iterator = self.dataframe.iterrows()
+
+        for index, row in iterator:
             # Skip if index is in existing dupes_index
             if index in processed_dupes_index:
                 continue
 
-            # Find duplicates based on normalized hostname only
-            dupes = self.dataframe[self.dataframe['normalized_hostname'] == row['normalized_hostname']]
+            # Find duplicates based on normalized hostname only using Polars-compatible syntax
+            normalized_hostname_filter = self.dataframe['normalized_hostname'] == row['normalized_hostname']
+            dupes = (
+                self.dataframe.filter(normalized_hostname_filter)
+                if hasattr(self.dataframe, 'filter')
+                else self.dataframe[normalized_hostname_filter]
+            )
             processed_dupes_index.update(dupes['index'])
 
             latest_hostname = self._get_latest_hostname(dupes)
 
             # Clean up product serial and machine ID for consistent output
-            dupes_clean = dupes.copy()
-            dupes_clean['ansible_product_serial'] = dupes_clean['ansible_product_serial'].replace('NA', None).replace('', None)
-            dupes_clean['ansible_machine_id'] = dupes_clean['ansible_machine_id'].replace('NA', None).replace('', None)
+            # Handle both pandas and polars DataFrame copy/clone methods
+            if hasattr(dupes, 'clone'):  # Polars DataFrame
+                dupes_clean = dupes.clone()
+            else:  # pandas DataFrame fallback
+                dupes_clean = dupes.copy()
+            dupes_clean = dupes_clean.with_columns([
+                dupes_clean['ansible_product_serial'].str.replace('NA', None).str.replace('', None).alias('ansible_product_serial'),
+                dupes_clean['ansible_machine_id'].str.replace('NA', None).str.replace('', None).alias('ansible_machine_id')
+            ])
 
             deduped_list.append(self._build_deduped_record(dupes, latest_hostname, dupes_clean))
 
@@ -179,7 +215,11 @@ class DedupRenewalExperimental(BaseDedupRenewal):
 
     def _apply_serial_deduplication(self, hostname_df):
         """Apply serial-based deduplication similar to CCSP experimental mode."""
-        hostname_df = hostname_df.copy()
+        # Handle both pandas and polars DataFrame copy/clone methods
+        if hasattr(hostname_df, 'clone'):  # Polars DataFrame
+            hostname_df = hostname_df.clone()
+        else:  # pandas DataFrame fallback
+            hostname_df = hostname_df.copy()
         expanded_df = self._expand_serial_records(hostname_df)
         if expanded_df is None or expanded_df.empty:
             return {'host_metric': hostname_df}
@@ -191,10 +231,23 @@ class DedupRenewalExperimental(BaseDedupRenewal):
     def _expand_serial_records(self, hostname_df):
         """Expand aggregated serial data back to individual records for processing."""
         expanded_records = []
-        for _, group_row in hostname_df.iterrows():
+        # Handle both pandas and polars DataFrame iteration methods
+        if hasattr(hostname_df, 'iter_rows'):  # Polars DataFrame
+            hostname_iterator = hostname_df.iter_rows(named=True)
+        else:  # pandas DataFrame fallback
+            hostname_iterator = (row for _, row in hostname_df.iterrows())
+
+        for group_row in hostname_iterator:
             hostnames_in_group = [h.strip() for h in group_row['hostnames'].split(',') if h.strip()]
             original_records = self.dataframe[self.dataframe['hostname'].isin(hostnames_in_group)]
-            for _, orig_row in original_records.iterrows():
+
+            # Handle both pandas and polars DataFrame iteration methods for original_records
+            if hasattr(original_records, 'iter_rows'):  # Polars DataFrame
+                orig_iterator = original_records.iter_rows(named=True)
+            else:  # pandas DataFrame fallback
+                orig_iterator = (row for _, row in original_records.iterrows())
+
+            for orig_row in orig_iterator:
                 # Parse multiple serial numbers from comma-separated values
                 product_serials = self._parse_multiple_serials(orig_row.get('ansible_product_serial'))
                 machine_ids = self._parse_multiple_serials(orig_row.get('ansible_machine_id'))
@@ -295,7 +348,13 @@ class DedupRenewalExperimental(BaseDedupRenewal):
         """Helper to group by compound serials."""
         compound_serials = expanded_df['compound_serial'].dropna()
         for compound_serial in compound_serials.unique():
-            serial_matches = expanded_df[expanded_df['compound_serial'] == compound_serial]
+            # Use Polars-compatible filtering syntax
+            serial_filter = expanded_df['compound_serial'] == compound_serial
+            serial_matches = (
+                expanded_df.filter(serial_filter)
+                if hasattr(expanded_df, 'filter')
+                else expanded_df[serial_filter]
+            )
             hostname_groups_in_serial = serial_matches['hostname_group'].unique()
             if len(hostname_groups_in_serial) > 1:
                 canonical_group = hostname_groups_in_serial[0]
@@ -308,7 +367,13 @@ class DedupRenewalExperimental(BaseDedupRenewal):
 
     def _group_by_individual_serial(self, expanded_df, serial_groups, processed_hostname_groups):
         """Helper to group by individual serials."""
-        for _, row in expanded_df.iterrows():
+        # Handle both pandas and polars DataFrame iteration methods
+        if hasattr(expanded_df, 'iter_rows'):  # Polars DataFrame
+            iterator = expanded_df.iter_rows(named=True)
+        else:  # pandas DataFrame fallback
+            iterator = (row for _, row in expanded_df.iterrows())
+
+        for row in iterator:
             if row['hostname_group'] not in processed_hostname_groups:
                 for serial in row['individual_serials']:
                     if serial:
@@ -329,7 +394,14 @@ class DedupRenewalExperimental(BaseDedupRenewal):
         """Build the final deduped list based on serial and hostname groups."""
         final_deduped_list = []
         canonical_groups = {info['canonical_group'] for info in serial_groups.values()}
-        for _, row in hostname_df.iterrows():
+
+        # Handle both pandas and polars DataFrame iteration methods
+        if hasattr(hostname_df, 'iter_rows'):  # Polars DataFrame
+            iterator = hostname_df.iter_rows(named=True)
+        else:  # pandas DataFrame fallback
+            iterator = (row for _, row in hostname_df.iterrows())
+
+        for row in iterator:
             hostname_group = row['hostname']
             if hostname_group in processed_hostname_groups:
                 self._handle_processed_group(
@@ -380,8 +452,22 @@ class DedupRenewalExperimental(BaseDedupRenewal):
             'hostmetric_record_count_deleted': (groups_data['hostmetric_record_count_deleted'].sum()),
             'hostnames': ', '.join([h for group in groups_data['hostnames'] for h in group.split(', ') if h]),
             'ansible_host_variables': ', '.join([h for group in groups_data['ansible_host_variables'] for h in group.split(', ') if h]),
-            'ansible_product_serials': self._merge_serial_fields([group['ansible_product_serials'] for _, group in groups_data.iterrows()]),
-            'ansible_machine_ids': self._merge_serial_fields([group['ansible_machine_ids'] for _, group in groups_data.iterrows()]),
+            'ansible_product_serials': self._merge_serial_fields(
+                [
+                    group['ansible_product_serials']
+                    for group in (
+                        groups_data.iter_rows(named=True) if hasattr(groups_data, 'iter_rows') else (row for _, row in groups_data.iterrows())
+                    )
+                ]
+            ),
+            'ansible_machine_ids': self._merge_serial_fields(
+                [
+                    group['ansible_machine_ids']
+                    for group in (
+                        groups_data.iter_rows(named=True) if hasattr(groups_data, 'iter_rows') else (row for _, row in groups_data.iterrows())
+                    )
+                ]
+            ),
             'deleted': groups_data['deleted'].min(),
             'first_automation': groups_data['first_automation'].min(),
             'last_automation': groups_data['last_automation'].max(),

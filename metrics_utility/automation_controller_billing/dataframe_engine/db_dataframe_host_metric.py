@@ -1,6 +1,6 @@
 import time
 
-import pandas as pd
+import polars as pd
 
 from opentelemetry import trace
 
@@ -44,7 +44,7 @@ class DBDataframeHostMetric(Base):
 
             # If the dataframe is empty, skip additional processing
             host_metric = batch_data.get('host_metric')
-            if host_metric is None or host_metric.empty:
+            if host_metric is None or len(host_metric) == 0:
                 continue
 
             batch_count = len(host_metric)
