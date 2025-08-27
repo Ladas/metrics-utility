@@ -664,6 +664,10 @@ class Base:
         labels = {k: v for k, v in labels.items() if k in columns}
         ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, labels)
 
+        # Sort by host name to ensure consistent ordering for tests
+        if self.HOST_NAME in ccsp_report_dataframe.columns:
+            ccsp_report_dataframe = ccsp_report_dataframe.sort(self.HOST_NAME)
+
         row_counter = 0
         rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
         for r_idx, row in enumerate(rows, current_row):
@@ -710,6 +714,9 @@ class Base:
             ])
             # Reset index only for grouped data (collection_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
+            
+            # Sort by collection_name to ensure consistent ordering
+            ccsp_report_dataframe = ccsp_report_dataframe.sort('collection_name')
 
         # Rename the columns based on the template
 
@@ -769,6 +776,9 @@ class Base:
             ])
             # Reset index only for grouped data (role_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
+            
+            # Sort by role_name to ensure consistent ordering
+            ccsp_report_dataframe = ccsp_report_dataframe.sort('role_name')
 
         # Rename the columns based on the template
 
@@ -829,6 +839,9 @@ class Base:
             ])
             # Reset index only for grouped data (module_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
+            
+            # Sort by module_name to ensure consistent ordering
+            ccsp_report_dataframe = ccsp_report_dataframe.sort('module_name')
 
         # Rename the columns based on the template
 

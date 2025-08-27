@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from opentelemetry import trace
 
@@ -629,7 +629,7 @@ class RollupManager:
                 shutil.rmtree(date_dir)
 
     @traced_method(SpanNames.ROLLUP_PARQUET_SAVE)
-    def save_rollup_data(self, target_date: date, dataframe_name: str, dataframe_obj, records_processed: int, processing_time: float) -> str:
+    def save_rollup_data(self, target_date: date, dataframe_name: str, dataframe_obj, records_processed: int, processing_time: float, validation_metrics: Optional[Dict[str, Any]] = None) -> str:
         """Save rollup data and create manifest for a specific dataframe"""
         current_span = trace.get_current_span()
 
@@ -700,7 +700,7 @@ class RollupManager:
             # Try parquet write again with converted types
             df_for_parquet.write_parquet(parquet_path)
 
-        # Save a simple metadata file in the version directory for debugging/info
+        # Save enhanced metadata file with validation metrics from OpenTelemetry tracing
         metadata = {
             'computation_timestamp': datetime.now().isoformat(),
             'processing_status': 'complete',
@@ -711,6 +711,18 @@ class RollupManager:
             'processing_time_seconds': processing_time,
             'version': version,
         }
+        
+        # ENHANCEMENT: Include validation metrics and performance data
+        # This makes rollup files self-documenting with their data quality statistics
+        
+        # Method 1: Use directly passed validation metrics (preferred when available)
+        if validation_metrics:
+            metadata.update(validation_metrics)
+        # Method 2: Extract from OpenTelemetry spans if available and no direct metrics provided
+        elif current_span and hasattr(current_span, 'attributes'):
+            span_metrics = self._extract_span_metrics(current_span)
+            if span_metrics:
+                metadata.update(span_metrics)
 
         metadata_path = os.path.join(version_dir, 'metadata.json')
         with open(metadata_path, 'w') as f:
@@ -727,6 +739,132 @@ class RollupManager:
 
         self.logger.info(f'Saved rollup {dataframe_name} for {target_date} as version {version}')
         return version
+
+    def _extract_span_metrics(self, current_span) -> Dict[str, Any]:
+        """Extract validation metrics and performance data from OpenTelemetry span attributes.
+        
+        This method collects all the data quality metrics, performance timings, and validation
+        statistics that were recorded during dataframe processing and includes them in the
+        rollup metadata for comprehensive self-documentation.
+        
+        Args:
+            current_span: OpenTelemetry span containing attributes
+            
+        Returns:
+            Dictionary of metrics to include in metadata.json
+        """
+        try:
+            if not current_span or not hasattr(current_span, 'attributes'):
+                return {}
+                
+            span_attrs = current_span.attributes or {}
+            metrics = {}
+            
+            # Extract data quality metrics by date
+            quality_metrics = {}
+            schema_metrics = {}
+            performance_metrics = {}
+            
+            for key, value in span_attrs.items():
+                key_str = str(key)
+                
+                # Data quality metrics by date (e.g., data_quality.2025-03-01.input_rows)
+                if key_str.startswith('data_quality.'):
+                    parts = key_str.split('.')
+                    if len(parts) >= 3:
+                        date_str = parts[1]
+                        metric_name = '.'.join(parts[2:])
+                        if date_str not in quality_metrics:
+                            quality_metrics[date_str] = {}
+                        quality_metrics[date_str][metric_name] = value
+                        
+                # Schema validation metrics by date (e.g., schema.2025-03-01.missing_columns)
+                elif key_str.startswith('schema.'):
+                    parts = key_str.split('.')
+                    if len(parts) >= 3:
+                        date_str = parts[1]
+                        metric_name = '.'.join(parts[2:])
+                        if date_str not in schema_metrics:
+                            schema_metrics[date_str] = {}
+                        schema_metrics[date_str][metric_name] = value
+                        
+                # Dataframe processing performance metrics
+                elif key_str.startswith('dataframe.'):
+                    performance_metrics[key_str] = value
+                    
+                # Rollup-specific metrics
+                elif key_str.startswith('rollup.'):
+                    metrics[key_str] = value
+                    
+                # Build metrics
+                elif key_str.startswith('dataframe.build.'):
+                    parts = key_str.split('.')
+                    if len(parts) >= 3:
+                        # Check if it includes a date (ISO format)
+                        for i, part in enumerate(parts):
+                            if len(part) == 10 and part.count('-') == 2:  # YYYY-MM-DD format
+                                date_str = part
+                                metric_name = '.'.join(parts[:i] + parts[i+1:])
+                                if 'build_performance' not in performance_metrics:
+                                    performance_metrics['build_performance'] = {}
+                                if date_str not in performance_metrics['build_performance']:
+                                    performance_metrics['build_performance'][date_str] = {}
+                                performance_metrics['build_performance'][date_str][metric_name] = value
+                                break
+                        else:
+                            # No date found, general build metric
+                            performance_metrics[key_str] = value
+            
+            # Add organized metrics to metadata
+            if quality_metrics:
+                metrics['data_quality_by_date'] = quality_metrics
+                
+            if schema_metrics:
+                metrics['schema_validation_by_date'] = schema_metrics
+                
+            if performance_metrics:
+                metrics['performance_metrics'] = performance_metrics
+                
+            # Calculate summary statistics
+            if quality_metrics:
+                total_input_rows = 0
+                total_valid_rows = 0
+                total_invalid_rows = 0
+                dates_processed = len(quality_metrics)
+                
+                for date_metrics in quality_metrics.values():
+                    total_input_rows += date_metrics.get('input_rows', 0)
+                    total_valid_rows += date_metrics.get('valid_rows', 0)
+                    total_invalid_rows += date_metrics.get('invalid_rows', 0)
+                
+                metrics['data_quality_summary'] = {
+                    'total_input_rows': total_input_rows,
+                    'total_valid_rows': total_valid_rows,
+                    'total_invalid_rows': total_invalid_rows,
+                    'overall_quality_ratio': total_valid_rows / total_input_rows if total_input_rows > 0 else 1.0,
+                    'dates_with_quality_data': dates_processed
+                }
+                
+            # Include schema completeness summary
+            if schema_metrics:
+                missing_columns_by_date = {}
+                for date_str, date_schema in schema_metrics.items():
+                    missing_cols = date_schema.get('missing_columns', '')
+                    if missing_cols:
+                        missing_columns_by_date[date_str] = missing_cols.split(',')
+                        
+                if missing_columns_by_date:
+                    metrics['schema_issues_summary'] = {
+                        'dates_with_missing_columns': len(missing_columns_by_date),
+                        'missing_columns_by_date': missing_columns_by_date
+                    }
+            
+            return metrics
+            
+        except Exception as e:
+            # Don't fail rollup processing if metrics extraction fails
+            self.logger.warning(f'Failed to extract span metrics for metadata: {e}')
+            return {}
 
     def save_error_metadata(self, target_date: date, dataframe_name: str, error_message: str) -> str:
         """Save error metadata for a failed rollup computation"""

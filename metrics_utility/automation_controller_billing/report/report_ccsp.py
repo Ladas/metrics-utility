@@ -288,9 +288,19 @@ class ReportCCSP(Base):
                 ])
             else:  # pandas DataFrame fallback
                 ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
-        ccsp_report['mark_x'] = ''
-        ccsp_report['unit_price'] = round(self.price_per_node, 2)
-        ccsp_report['extended_unit_price'] = round((ccsp_report['quantity_consumed'] * ccsp_report['unit_price']), 2)
+        # Add columns using Polars syntax
+        if hasattr(ccsp_report, 'with_columns'):  # Polars DataFrame
+            ccsp_report = ccsp_report.with_columns([
+                pd.lit('').alias('mark_x'),
+                pd.lit(round(self.price_per_node, 2)).alias('unit_price')
+            ])
+            ccsp_report = ccsp_report.with_columns(
+                (pd.col('quantity_consumed') * pd.col('unit_price')).round(2).alias('extended_unit_price')
+            )
+        else:  # pandas DataFrame fallback
+            ccsp_report['mark_x'] = ''
+            ccsp_report['unit_price'] = round(self.price_per_node, 2)
+            ccsp_report['extended_unit_price'] = round((ccsp_report['quantity_consumed'] * ccsp_report['unit_price']), 2)
 
         # order the columns right - use select for Polars compatibility
         if hasattr(ccsp_report, 'select'):  # Polars DataFrame

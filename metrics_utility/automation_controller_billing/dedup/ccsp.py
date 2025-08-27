@@ -19,24 +19,10 @@ class DedupCCSP:
             return new
 
         if not self.experimental:
-            # For non-experimental mode, apply basic deduplication using canonical hostname
-            # Create mapping and apply deduplication
-            # Handle both pandas and polars DataFrame copy/clone methods
-            if hasattr(dedup_info, 'clone'):  # Polars DataFrame
-                mapping = self.df_to_mapping(dedup_info.clone())
-            else:  # pandas DataFrame fallback
-                mapping = self.df_to_mapping(dedup_info.copy())
-
-            # Apply dedup to the class names we have
-            # We need the dataframe instances to call dedup methods, but we return the actual data
-            for class_name in ['DataframeJobhostSummaryUsage', 'DataframeContentUsage', 'DataframeInventoryScope']:
-                if class_name in new and new[class_name] is not None and len(new[class_name]) > 0:
-                    # Get the dataframe instance to call the dedup method
-                    if hasattr(self, 'dataframe_instances') and class_name in self.dataframe_instances:
-                        # Call dedup on the instance but make sure we get back the actual DataFrame
-                        deduped_df = self.dataframe_instances[class_name].dedup(new[class_name], mapping)
-                        new[class_name] = deduped_df
-
+            # For non-experimental mode, do NOT deduplicate by serial numbers
+            # Only the experimental mode should perform serial-based deduplication
+            # Return the data as-is without any deduplication
+            print("DEBUG DEDUP: Non-experimental CCSP mode - no deduplication by serial numbers")
             return new
 
         # each host_name in dedup_info has a list of combined serials

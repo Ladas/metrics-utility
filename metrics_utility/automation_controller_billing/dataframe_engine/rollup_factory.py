@@ -165,6 +165,7 @@ class RollupDataframeFactory:
     def _compute_missing_rollups(self, missing_dates, required_dataframes):
         """Compute rollups for missing dates using direct function calls instead of subprocess"""
         import os
+
         from metrics_utility.automation_controller_billing.extract.factory import Factory as ExtractorFactory
         from metrics_utility.automation_controller_billing.rollups.manager import BatchRollupTask, RollupManager
 
@@ -178,7 +179,7 @@ class RollupDataframeFactory:
             if not os.path.isabs(ship_path):
                 # Convert relative path to absolute Docker path
                 ship_path = os.path.abspath(ship_path)
-            
+
             self.logger.info(f'Computing rollups for dates: {missing_dates} using ship_path: {ship_path}')
 
             # Create resolved extra_params for the direct function calls
@@ -190,9 +191,7 @@ class RollupDataframeFactory:
             extractor = ExtractorFactory(resolved_extra_params.get('ship_target', 'directory'), resolved_extra_params).create()
 
             # Create execution plan for missing dates
-            smart_plan = rollup_manager.create_smart_dependency_plan(
-                since_date, until_date, required_dataframes, force=False, extractor=extractor
-            )
+            smart_plan = rollup_manager.create_smart_dependency_plan(since_date, until_date, required_dataframes, force=False, extractor=extractor)
 
             if not smart_plan:
                 self.logger.info('No rollups need computation.')
@@ -220,7 +219,9 @@ class RollupDataframeFactory:
     def _compute_rollup_for_batch_task(self, rollup_manager, batch_task, extractor, resolved_extra_params):
         """Compute rollups for a batch task (single date, multiple dataframes)"""
         import time
+
         from opentelemetry import trace
+
         from metrics_utility.tracing import SpanNames, add_span_attributes
 
         target_date = batch_task.target_date
@@ -245,7 +246,17 @@ class RollupDataframeFactory:
             for dataframe_name, dataframe in dataframes.items():
                 if dataframe is not None and len(dataframe) > 0:
                     records_processed = len(dataframe)
-                    rollup_manager.save_rollup_data(target_date, dataframe_name, dataframe, records_processed, processing_time)
+                    
+                    # ENHANCEMENT: Collect validation metrics from dataframe instance if available
+                    validation_metrics = None
+                    if hasattr(self, '_dataframe_instances') and dataframe_name in self._dataframe_instances:
+                        dataframe_instance = self._dataframe_instances[dataframe_name]
+                        if hasattr(dataframe_instance, 'get_validation_metrics'):
+                            validation_metrics = dataframe_instance.get_validation_metrics()
+                            if validation_metrics:
+                                self.logger.debug(f'Collected {len(validation_metrics)} validation metrics for {dataframe_name}')
+                    
+                    rollup_manager.save_rollup_data(target_date, dataframe_name, dataframe, records_processed, processing_time, validation_metrics)
                     self.logger.info(f'✓ Stored rollup for {dataframe_name} on {target_date} with {records_processed} records')
                 else:
                     # Store metadata for no-data case
@@ -257,37 +268,44 @@ class RollupDataframeFactory:
         # Build batch data iterator for this specific date
         batch_data_iterator = extractor.iter_batches(target_date)
         
+        # Initialize dataframe instances storage for validation metrics collection
+        if not hasattr(self, '_dataframe_instances'):
+            self._dataframe_instances = {}
+
         # Create dataframe instances using resolved_extra_params
         dataframe_instances = {}
         for dataframe_name in dataframe_names:
             # Get dataframe class by name (dataframe_names contains class names like 'DataframeJobhostSummaryUsage')
             DataframeClass = self._get_dataframe_class_by_name_unified(dataframe_name)
             if DataframeClass:
-                dataframe_instances[dataframe_name] = DataframeClass(extractor, self.month, resolved_extra_params)
+                dataframe_instance = DataframeClass(extractor, self.month, resolved_extra_params)
+                dataframe_instances[dataframe_name] = dataframe_instance
+                # Store reference for validation metrics collection
+                self._dataframe_instances[dataframe_name] = dataframe_instance
                 self.logger.info(f'Created dataframe instance for {dataframe_name}: {DataframeClass.__name__}')
             else:
                 self.logger.warning(f'No class mapping found for dataframe: {dataframe_name}')
-        
+
         # Process each batch and accumulate data
         result_dataframes = {name: None for name in dataframe_names}
         batch_count = 0
-        
+
         for batch_data in batch_data_iterator:
             batch_count += 1
             self.logger.info(f'Processing batch {batch_count} for {target_date}: keys={list(batch_data.keys())}')
             batch_data['_date_context'] = target_date  # Add date context
-            
+
             # Process this batch for each required dataframe
             for dataframe_name, dataframe_instance in dataframe_instances.items():
                 # Create iterator that yields just this batch
                 single_batch_iterator = [batch_data]
-                
+
                 # Build dataframe for this batch
                 batch_result = dataframe_instance.build_dataframe(iter(single_batch_iterator))
-                
+
                 if batch_result is not None and len(batch_result) > 0:
                     self.logger.info(f'Got {len(batch_result)} records for {dataframe_name} from batch {batch_count}')
-                
+
                 # Merge with accumulated results
                 if result_dataframes[dataframe_name] is None:
                     result_dataframes[dataframe_name] = batch_result
@@ -295,17 +313,19 @@ class RollupDataframeFactory:
                     # Debug schema before merge to identify vstack issues
                     existing_df = result_dataframes[dataframe_name]
                     self.logger.info(f'ROLLUP DEBUG: Merging {dataframe_name} - existing: {existing_df.columns if existing_df is not None else None}')
-                    self.logger.info(f'ROLLUP DEBUG: Merging {dataframe_name} - new batch: {batch_result.columns if batch_result is not None else None}')
-                    
+                    self.logger.info(
+                        f'ROLLUP DEBUG: Merging {dataframe_name} - new batch: {batch_result.columns if batch_result is not None else None}'
+                    )
+
                     try:
                         result_dataframes[dataframe_name] = dataframe_instance.merge(existing_df, batch_result)
                         self.logger.info(f'ROLLUP DEBUG: Successfully merged {dataframe_name}')
                     except Exception as merge_error:
                         self.logger.error(f'ROLLUP DEBUG: Merge failed for {dataframe_name}: {merge_error}')
                         raise merge_error
-        
+
         self.logger.info(f'Processed {batch_count} batches for {target_date}')
-        
+
         # build_dataframe() already groups the data, so result_dataframes contains grouped dataframes
         return result_dataframes
 
@@ -370,7 +390,7 @@ class RollupDataframeFactory:
             if rollup_name in merged_dataframes:
                 # Use merged rollup data directly
                 dataframe_data = merged_dataframes[rollup_name]
-                
+
                 # Return actual pandas DataFrame for reports
                 if dataframe_data is not None:
                     result[standard_name] = dataframe_data
@@ -615,7 +635,6 @@ class RollupDataframeFactory:
             'DBDataframeHostMetric': DBDataframeHostMetric,
         }
         return class_mapping.get(class_name)
-
 
     def _convert_to_standard_names(self, class_dataframes):
         """Convert class-based dataframes to standard names expected by reports."""
