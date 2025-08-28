@@ -282,6 +282,18 @@ class DataframeContentUsage(Base):
     # ========================================
     # BUSINESS LOGIC METHODS
     # ========================================
+    def _process_batch_data_with_schema(self, batch_data, current_span):
+        """Process batch data and apply collector_dataframe_schema (BEFORE grouping).
+        
+        Override base class method to avoid double schema application since
+        processing already applies the schema.
+        """
+        processed_data = self._process_batch_data(batch_data, current_span)
+        if processed_data is None or len(processed_data) == 0:
+            return self.empty()
+        # Schema already applied in processing, no need to apply again
+        return processed_data
+
     def _process_batch_data(self, batch_data, current_span):
         """Process individual batch data using centralized schema-driven approach.
         

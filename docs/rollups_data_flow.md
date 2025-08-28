@@ -1,236 +1,453 @@
-# Rollups Data Format Flow and Schema Operations
+# Rollups Data Flow - Canonical 8-Stage Pipeline
 
-This document provides a comprehensive diagram of the data format flow through all operations in the rollups system, showing exactly where schema operations occur and what data types are expected at each stage.
+**CRITICAL**: This data flow specification must NEVER be changed. It defines the clean separation of concerns that ensures data integrity throughout the AAP Controller billing metrics system.
 
-## Comprehensive Data Format Flow Diagram
+## Overview
 
-```mermaid
-graph TB
-    %% Raw Data Input
-    A[Raw CSV Data from Tarballs] --> A1{CSV Column Types}
-    A1 --> A2[Strings, Mixed Types, Inconsistent Formats]
-    
-    %% Stage 1: CSV Processing with Collector Schema
-    A2 --> B[_process_batch_data - CSV Processing]
-    B --> B1[apply_complete_schema - collector_dataframe]
-    B1 --> B2[Schema: created as String, task_runs as Int64]
-    B2 --> B3[Complete: columns added, types cast, ordering applied]
-    B3 --> B4[Result: Data ready for grouping - BEFORE group()]
-    
-    %% Stage 2: Grouping with Initial Aggregations  
-    B4 --> C[group - Initial Aggregation Operations]
-    C --> C1[Apply initial_aggregations rules + complex type processing]
-    C1 --> C2[created.min→first_automation, created.max→last_automation]
-    C1 --> C2a[Facts: JSON→list format merge, Collections: unique arrays]
-    C2 --> C3[apply_complete_schema - dataframe - AFTER group()]
-    C2a --> C3
-    C3 --> C4[Schema: first_automation as Datetime, complex types as JSON strings]
-    C4 --> C5[Complete: columns added, types cast, ordering applied]
-    C5 --> C6[Result: Grouped data with proper working types + complex data]
-    
-    %% Stage 3: Merging Multiple CSV Groups 
-    C6 --> D[merge - Combine Multiple CSV Groups]
-    D --> D1[_align_schemas_for_concat with dataframe_schema]
-    D1 --> D2[Both DataFrames converted to consistent working types]
-    D2 --> D3[polars.concat - Vertical concatenation]
-    D3 --> D4[regroup_with_schema - Re-aggregate with complex type merging]
-    D4 --> D4a[Facts: merge list format JSONs, Collections: merge arrays]
-    D4 --> D5[apply_complete_schema - dataframe after merge]
-    D4a --> D5
-    D5 --> D6[Complete: consistent working types maintained]
-    D6 --> D7[Result: Merged data with consistent Polars types + merged complex data]
-    
-    %% Stage 4: Final Processing Before Storage
-    D7 --> E[Final Processing Before Storage]
-    E --> E1[apply_complete_schema - dataframe final validation]
-    E1 --> E2[Complete: all columns, types, ordering validated]
-    E2 --> E3[Convert to parquet_schema types for storage]
-    E3 --> E4[Result: Storage-ready data with parquet schema types]
-    
-    %% Stage 5: Parquet Storage
-    E4 --> F[Save to Parquet File]
-    F --> F1[parquet_schema types optimized for storage]
-    F1 --> F2[Datetime→timestamp[us], String→large_string, etc.]
-    F2 --> F3[Stored: Efficient parquet with proper types]
-    
-    %% Stage 6: Loading from Parquet
-    F3 --> G[Load from Parquet - load_from_parquet]
-    G --> G1[PyArrow/Polars read_parquet with Object type handling]
-    G1 --> G2[Object types converted to JSON strings for compatibility]
-    G2 --> G3[apply_complete_schema - dataframe after load]
-    G3 --> G4[Complete: parquet→working type conversion]
-    G4 --> G5[Result: Working data with consistent dataframe_schema types]
-    
-    %% Stage 7: Merging Multiple Rollup Files
-    G5 --> H[Merge Multiple Rollup Files in Reader]
-    H --> H1[All files have consistent dataframe_schema types]
-    H1 --> H2[polars.concat - Combine multiple daily rollups]
-    H2 --> H3[regroup - Final aggregation across dates]
-    H3 --> H4[apply_complete_schema - dataframe final merge]
-    H4 --> H5[Complete: final working types for reporting]
-    H5 --> H6[Result: Final aggregated data for reporting]
-    
-    %% Centralized Schema Operations
-    subgraph "Centralized apply_complete_schema Method"
-        CS[apply_complete_schema - Base Class Method]
-        CS --> CS1[Step 1: Get schema dict and default values]
-        CS1 --> CS2[Step 2: _ensure_schema_columns - add missing with defaults]
-        CS2 --> CS3[Step 3: _apply_schema_casting - convert types]
-        CS3 --> CS4[Step 4: _ensure_consistent_column_ordering]
-        CS4 --> CS5[Result: Complete schema applied consistently]
-    end
-    
-    %% Schema Type Definitions
-    subgraph "Schema Type Definitions"
-        S1[collector_dataframe_schema]
-        S1 --> S1A[CSV Processing Types - Before Grouping]
-        S1A --> S1B[created: String, job_created: String]
-        S1A --> S1C[task_runs: Int64, canonical_facts: String]
-        
-        S2[dataframe_schema - WORKING TYPES]
-        S2 --> S2A[In-Memory Processing Types - After Grouping]
-        S2A --> S2B[first_automation: Datetime, last_automation: Datetime]
-        S2A --> S2C[task_runs: Int64, canonical_facts: String]
-        
-        S3[parquet_schema - STORAGE TYPES]
-        S3 --> S3A[Parquet Storage Types - Optimized for Disk]
-        S3A --> S3B[first_automation: timestamp[us], last_automation: timestamp[us]]
-        S3A --> S3C[task_runs: int64, canonical_facts: large_string]
-    end
-    
-    %% Critical Points - All using centralized method
-    classDef critical fill:#ff9999,stroke:#333,stroke-width:4px
-    classDef schema fill:#99ccff,stroke:#333,stroke-width:2px
-    classDef working fill:#99ff99,stroke:#333,stroke-width:2px
-    classDef storage fill:#ffcc99,stroke:#333,stroke-width:2px
-    classDef centralized fill:#ff99ff,stroke:#333,stroke-width:3px
-    
-    class B1,C3,D5,E1,G3,H4 critical
-    class S1,S2,S3 schema
-    class C6,D7,G5,H6 working
-    class F2,F3,G2 storage
-    class CS,CS1,CS2,CS3,CS4,CS5 centralized
+The rollups data flow follows a strict 10-stage pipeline that separates concerns between raw CSV input, internal processing with native Polars types, and storage format conversion. Each stage has a specific purpose and uses appropriate data types for that stage.
+
+## The 10 Stages - Definitive Flow
+
+### Stage 1: Raw CSV Input (JSON Strings)
+- **Operation**: CSV loading with PyArrow schema validation
+- **Input Schema**: Raw CSV files (no schema - unstructured data)
+- **Output Schema**: `collector_schema()` - PyArrow schema with JSON strings
+- **Exact Operation**: `pd.read_csv()` + `validate_with_schema(df, collector_schema())`
+- **Data Types**: JSON strings in complex columns (`pa.string()` for facts, lists, etc.)
+- **Example**: `{"canonical_facts": "{\"os\": \"linux\", \"arch\": \"x86_64\"}"}`
+
+### Stage 2: CSV to Native Type Conversion (Input Boundary)
+- **Operation**: JSON string parsing to native Polars types
+- **Input Schema**: `collector_schema()` (JSON strings from Stage 1)
+- **Output Schema**: `collector_dataframe_schema()` (Native Polars types)
+- **Exact Operation**: `apply_complete_schema(df, schema_type="collector_dataframe")`
+- **Conversion Logic**: 
+  - JSON strings → Native List types via `map_elements(parse_json_to_list, return_dtype=pd.List)`
+  - `pa.string()` → `'List'` for facts dictionaries as key-value pairs
+  - `pa.string()` → `'List'` for collections (organizations, inventories)
+  - **CRITICAL**: Never use `pd.Object` - transform all JSON to List format instead
+- **Purpose**: Prepare data for efficient native aggregation operations
+
+### Stage 3: Initial Aggregation (Group Method)
+- **Operation**: Group-by aggregation within single CSV batch
+- **Input Schema**: `collector_dataframe_schema()` (native types from Stage 2)
+- **Output Schema**: `dataframe_schema()` (native types, identical structure)
+- **Exact Operation**: `df.group_by(unique_index_columns()).agg(initial_aggregations())`
+- **Aggregation Logic**: 
+  - List columns: `.unique()` to collect unique values
+  - Struct columns: `.first()` or custom merge functions for dictionaries
+  - Numeric columns: `.sum()`, `.max()`, `.min()` as appropriate
+- **Purpose**: Aggregate duplicate records within single CSV file
+
+### Stage 4: Rollup Aggregation (Regroup Method)
+- **Operation**: Cross-file rollup merging with native type operations
+- **Input Schema**: Multiple DataFrames with `dataframe_schema()` types
+- **Output Schema**: Single DataFrame with `dataframe_schema()` types (same structure)
+- **Exact Operation**: `concat(dataframes).group_by(unique_index_columns()).agg(operations())`
+- **Aggregation Logic**:
+  - List merging: `merge_native_lists()` - concatenate and deduplicate
+  - Struct merging: `merge_native_dicts()` - deep merge dictionary contents
+  - Numeric aggregation: `.sum()`, `.max()` based on business logic
+- **Purpose**: Combine pre-aggregated data from multiple rollup sources
+
+### Stage 5: Storage Conversion (Storage Boundary)
+- **Operation**: Native type to JSON string conversion for storage
+- **Input Schema**: `dataframe_schema()` (native types from Stage 4)
+- **Output Schema**: `parquet_schema()` (JSON strings for storage)
+- **Exact Operation**: `df.with_columns([struct_cols.map_elements(json.dumps), list_cols.map_elements(json.dumps)])`
+- **Conversion Logic**:
+  - Native Struct → JSON string via `json.dumps()`
+  - Native List → JSON array string via `json.dumps()`
+  - Primitive types remain unchanged
+- **Purpose**: Ensure parquet compatibility and storage consistency
+
+### Stage 6: Parquet Storage (JSON Strings)
+- **Operation**: Write DataFrame to parquet with schema validation
+- **Input Schema**: `parquet_schema()` (JSON strings from Stage 5)
+- **Output Schema**: Stored parquet files with `parquet_schema()` structure
+- **Exact Operation**: `validate_with_schema(df, parquet_schema())` + `df.write_parquet()`
+- **Data Types**: All complex types as JSON strings (`pa.string()`)
+- **Purpose**: Persistent storage with cross-system compatibility
+
+---
+
+## Report Generation Pipeline (Additional Stages)
+
+### Stage 7: Parquet Loading (Report Generation)
+- **Operation**: Load multiple parquet files for cross-date report generation
+- **Input Schema**: Multiple parquet files with `parquet_schema()` structure
+- **Output Schema**: DataFrames with `parquet_schema()` types (JSON strings)
+- **Exact Operation**: `pd.read_parquet(file)` + `validate_with_schema(df, parquet_schema())`
+- **Data Loading**: Load parquet files from date range, validate schema consistency
+- **Purpose**: Load persisted rollup data for multi-file aggregation
+
+### Stage 8: Parquet to Working Schema Conversion
+- **Operation**: Convert loaded JSON strings back to native types
+- **Input Schema**: `parquet_schema()` (JSON strings from Stage 7)
+- **Output Schema**: `dataframe_schema()` (Native Polars types)
+- **Exact Operation**: `apply_complete_schema(df, schema_type="dataframe")`
+- **Conversion Logic**:
+  - JSON strings → Native List types via `map_elements(parse_json_to_list, return_dtype=pd.List)`
+  - `pa.string()` → `'List'` for facts dictionaries as key-value pairs  
+  - `pa.string()` → `'List'` for collections arrays
+  - **CRITICAL**: Never use `pd.Object` - transform all JSON to List format instead
+- **Purpose**: Restore native types for efficient cross-file processing
+
+### Stage 9: Multi-File Rollup Merging
+- **Operation**: Merge rollups across multiple dates/sources
+- **Input Schema**: Multiple DataFrames with `dataframe_schema()` types
+- **Output Schema**: Single DataFrame with `dataframe_schema()` types (same structure)
+- **Exact Operation**: `concat(all_dataframes).group_by(unique_index_columns()).agg(operations())`
+- **Aggregation Logic**: Same as Stage 4 - native type merging operations
+- **Purpose**: Combine daily rollups across date ranges for comprehensive reporting
+
+### Stage 10: Report Sheet Generation
+- **Operation**: Generate XLSX sheets via specialized group-by aggregations
+- **Input Schema**: `dataframe_schema()` (native types from Stage 9)
+- **Output Schema**: Report-specific aggregated DataFrames (optimized for XLSX)
+- **Exact Operation**: `df.group_by(report_columns).agg(report_specific_aggregations())`
+- **Aggregation Examples**:
+  - Managed Nodes: Group by host, aggregate job runs and task counts
+  - Usage by Collections: Group by collection name, sum durations and counts
+  - Inventory Scope: Group by host, merge all organizational associations
+- **Purpose**: Create final aggregated data optimized for XLSX report sheets
+
+## Critical Separation Points
+
+### Input Boundary (Stage 1→2)
+```python
+# CORRECT: Convert JSON strings to native types at input
+billing_data = billing_data.with_columns([
+    billing_data['canonical_facts'].map_elements(convert_json_to_dict, return_dtype=pd.Object).alias('canonical_facts'),
+    billing_data['facts'].map_elements(convert_json_to_dict, return_dtype=pd.Object).alias('facts'),
+])
 ```
 
-## Schema Operation Points
+### Processing Core (Stages 3-6)
+```python
+# CORRECT: All internal processing uses native types
+collector_dataframe_schema = {
+    'canonical_facts': 'Struct',  # Native Struct type
+    'facts': 'Struct',            # Native Struct type  
+    'organizations': 'List',      # Native List type
+}
 
-### Critical Schema Application Points
+dataframe_schema = {
+    'canonical_facts': 'Struct',  # Native Struct type
+    'facts': 'Struct',            # Native Struct type
+    'organizations': 'List',      # Native List type
+}
+```
 
-1. **CSV Processing - BEFORE group() (Stage 1)**
-   - **Input**: Raw CSV strings, mixed types
-   - **Operation**: `collector_dataframe_schema()` applied
-   - **Output**: Consistent types ready for aggregation (strings for timestamps, Int64 for counters)
-   - **Purpose**: Prepare data for group() operations with proper types
+### Storage Boundary (Stage 6→7)
+```python
+# CORRECT: Convert native types to JSON strings before storage
+result = result.with_columns([
+    result['canonical_facts'].map_elements(lambda x: json.dumps(x) if x else '{}', return_dtype=pd.Utf8).alias('canonical_facts'),
+    result['organizations'].map_elements(lambda x: json.dumps(x) if x else '[]', return_dtype=pd.Utf8).alias('organizations'),
+])
+```
 
-2. **After Grouping - AFTER group() (Stage 2)**
-   - **Input**: Grouped/aggregated data (first_automation, last_automation created)
-   - **Operation**: `dataframe_schema()` applied  
-   - **Output**: Working types (Datetime for timestamps, proper aggregated columns)
-   - **Purpose**: Convert aggregated data to working types for merging and processing
-   - **Complex Types**: Facts converted to list format JSON, collections to unique arrays
+## Schema Method Responsibilities
 
-3. **During Multiple CSV Merging (Stage 3)**
-   - **Input**: Multiple DataFrames from different CSV files to merge
-   - **Operation**: `dataframe_schema()` alignment + `regroup_with_schema()`
-   - **Output**: Type-consistent merged data with properly merged complex types
-   - **Purpose**: Combine data from multiple CSV files while preserving complex type integrity
-   - **Complex Types**: Facts list formats merged, collections arrays merged with unique values
+### `collector_schema()` - Stage 1
+- **Purpose**: Validate raw CSV input
+- **Format**: JSON strings (`pa.string()` for all complex columns)
+- **Usage**: Raw CSV validation only
 
-4. **Before Storage (Stage 4)**
-   - **Input**: Final processed data after CSV merging
-   - **Operation**: Convert to `parquet_schema()` types
-   - **Output**: Storage-optimized types
-   - **Purpose**: Optimize for parquet storage efficiency
+### `collector_dataframe_schema()` - Stages 3-4
+- **Purpose**: Define processing schema with native types
+- **Format**: Native Polars types (`'Struct'`, `'List'`)
+- **Usage**: After input conversion, before/during `group()` method
 
-5. **After Loading (Stage 6)**
-   - **Input**: Data loaded from parquet
-   - **Operation**: Convert to `dataframe_schema()` types
-   - **Output**: Working types for processing
-   - **Purpose**: Restore working types from storage format
+### `dataframe_schema()` - Stages 4-6  
+- **Purpose**: Define working schema for all internal operations
+- **Format**: Native Polars types (same as collector_dataframe_schema)
+- **Usage**: All intermediate processing, `regroup()` method
 
-6. **During Rollup Merging (Stage 7)**
-   - **Input**: Multiple rollup files from different dates
-   - **Operation**: `dataframe_schema()` consistency + complex type merging
-   - **Output**: Final aggregated working data
-   - **Purpose**: Merge daily rollups across date ranges for reporting
-   - **Complex Types**: Cross-date fact merging and collection aggregation
+### `parquet_schema()` - Stage 8
+- **Purpose**: Define storage format
+- **Format**: JSON strings (`pa.string()` for complex columns)
+- **Usage**: Parquet writing/reading validation
+
+## Aggregation Patterns
+
+### Native Type Aggregation (Stages 4-6)
+```python
+# Lists: Collect unique values
+pd.col('organizations').unique().alias('organizations')
+
+# Structs: Merge dictionaries with custom logic
+pd.col('canonical_facts').map_batches(
+    lambda s: pd.Series([merge_native_dicts(s.to_list())]),
+    return_dtype=pd.Object
+).first().alias('canonical_facts')
+```
+
+### Custom Merge Functions
+```python
+def merge_native_lists(series):
+    """Merge multiple List columns into single List with unique values"""
+    all_values = []
+    for lst in series:
+        if lst is not None and isinstance(lst, list):
+            all_values.extend(lst)
+        elif lst is not None:
+            all_values.append(lst)
+    return sorted(list(dict.fromkeys([str(v) for v in all_values if v is not None])))
+
+def merge_native_dicts(series):
+    """Merge multiple dict columns following demo_prompt_facts.md patterns"""
+    merged_dict = {}
+    for d in series:
+        if d is not None and isinstance(d, dict):
+            for key, values in d.items():
+                if key not in merged_dict:
+                    merged_dict[key] = []
+                
+                if isinstance(values, list):
+                    merged_dict[key].extend(values)
+                else:
+                    merged_dict[key].append(values)
+    
+    # Remove duplicates and sort
+    for key in merged_dict:
+        filtered = [str(x) for x in merged_dict[key] if x is not None]
+        merged_dict[key] = sorted(list(set(filtered)))
+    
+    return merged_dict
+```
+
+## Dict-to-List Transformation Strategy
+
+### Why Lists Instead of Structs/Objects
+
+**CRITICAL PRINCIPLE**: Never use `pd.Object` in Polars - it doesn't exist and causes casting failures.
+
+Instead, transform dictionary-like JSON data into Lists of key-value pairs:
+
+```python
+# WRONG: Trying to use Object/Struct types
+facts = {"fact2": ["value1", "value2"], "fact3": ["value1"]}  # pd.Object - fails
+
+# CORRECT: Transform to List of key-value pairs with consistent array format
+facts = [["fact2", ["value1", "value2"]], ["fact3", ["value1"]]]  # pd.List - works
+```
+
+### Dictionary-to-List Conversion
+
+**CRITICAL**: All values must be arrays for consistent merging operations.
+
+```python
+def dict_to_list_pairs(json_dict):
+    """Convert dictionary to list of [key, value] pairs with consistent array format."""
+    if json_dict is None or not isinstance(json_dict, dict):
+        return []
+    result = []
+    for key, value in json_dict.items():
+        # Ensure all values are arrays for consistent merging
+        if isinstance(value, list):
+            result.append([key, value])
+        else:
+            result.append([key, [value]])  # Wrap single values in arrays
+    return result
+
+def list_pairs_to_dict(list_pairs):
+    """Convert list of [key, value] pairs back to dictionary."""
+    if not isinstance(list_pairs, list):
+        return {}
+    return {pair[0]: pair[1] for pair in list_pairs if len(pair) == 2}
+```
+
+### Benefits of List-Based Approach
+
+1. **Native Polars Support**: Lists are fully supported native types
+2. **Efficient Aggregation**: Can use `.unique()`, `.concat()` operations  
+3. **Consistent Schema**: No type casting failures
+4. **Storage Compatible**: Lists serialize cleanly to JSON arrays
+
+## Type Conversion Utilities
+
+### JSON to Native (Stage 1→2)
+```python
+def convert_json_to_dict(json_str):
+    """Convert JSON string to native dict for Polars Struct"""
+    import json
+    if json_str is None or json_str == '':
+        return {}
+    try:
+        parsed = json.loads(json_str)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+```
+
+### Native to JSON (Stage 6→7)
+```python
+def convert_dict_to_json(native_dict):
+    """Convert native dict to JSON string for storage"""
+    import json
+    if native_dict is None:
+        return '{}'
+    try:
+        return json.dumps(native_dict)
+    except (TypeError, ValueError):
+        return '{}'
+```
 
 ## Type Flow Summary
 
-### Part 1: Data Processing and Storage Flow
+### Complete 10-Stage Pipeline Flow
 
 ```
-Raw CSV → collector_dataframe_schema → group() → dataframe_schema → merge() → dataframe_schema → parquet_schema → PARQUET STORAGE
-                     ↓                     ↓           ↓              ↓            ↓                ↓                    ↓
-              (String timestamps)    Aggregation  (Datetime objects)   Merging   Working Types    Storage Types      [Files on Disk]
-                     ↓                     ↓           ↓              ↓            ↓                ↓                    ↓
-                Processing Ready      Min/Max Ops   Working Types    Combine CSVs  Consistent Types  Optimized Types    Persistent Data
-                     ↓                     ↓           ↓              ↓            ↓                ↓                    ↓
-               BEFORE group()        Grouping      AFTER group()    Multiple CSVs  Working Schema   Parquet Schema     Daily Rollups
+ROLLUP GENERATION PIPELINE:
+Stage 1: Raw CSV Input (JSON Strings)
+         ↓ collector_schema() validation
+Stage 2: CSV to Native Type Conversion
+         ↓ convert_json_to_dict()
+Stage 3: Collector DataFrame Schema (Native Types)  
+         ↓ collector_dataframe_schema() applied
+Stage 4: Initial Aggregation (Group Method)
+         ↓ group() with native type operations
+Stage 5: Rollup Aggregation (Regroup Method)
+         ↓ regroup() with native type merging
+Stage 6: Parquet Storage (JSON Strings)
+         ↓ parquet_schema() validation & storage
+
+REPORT GENERATION PIPELINE:
+Stage 7: Parquet Loading (Report Generation)
+         ↓ load multiple parquet files
+Stage 8: Parquet to Working Schema Conversion
+         ↓ parquet_schema() → dataframe_schema()
+Stage 9: Multi-File Rollup Merging
+         ↓ concat + regroup with native types
+Stage 10: Report Sheet Generation
+         ↓ group_by.agg for XLSX sheets
 ```
 
-### Part 2: Rollups Loading and Report Generation Flow
+### Detailed Schema Application Flow
 
 ```
-PARQUET STORAGE → Reader.load_from_parquet → dataframe_schema → Merging → Final Reports
-        ↓                        ↓                    ↓             ↓            ↓
-  [Files on Disk]      Object type handling    Working Types   Cross-Date    XLSX Output
-        ↓                        ↓                    ↓             ↓            ↓
-  Daily Rollups        PyArrow conversion     Datetime objects   Aggregation   CCSPv2 Report
-        ↓                        ↓                    ↓             ↓            ↓
-  Multiple Dates    Enhanced compatibility   Consistent Types   Combined Data  Final Report
+Stage 1: Raw CSV Input
+         ↓ Schema: collector_schema() - JSON Strings (pa.string)
+         ↓ Purpose: Validate CSV structure
+
+Stage 2: Input Boundary Conversion  
+         ↓ Process: convert_json_to_dict()
+         ↓ Transform: JSON Strings → Native Types
+
+Stage 3: Collector DataFrame Processing
+         ↓ Schema: collector_dataframe_schema() - Native Types (Struct/List)
+         ↓ Purpose: Efficient processing before aggregation
+
+Stage 4: Initial Aggregation (Group)
+         ↓ Process: group() method with native operations
+         ↓ Types: Native Polars aggregation (.unique(), .first())
+
+Stage 5: Working DataFrame Operations
+         ↓ Schema: dataframe_schema() - Native Types (Struct/List)  
+         ↓ Purpose: Internal processing and merging
+
+Stage 6: Rollup Aggregation (Regroup)
+         ↓ Process: regroup() method with native merging
+         ↓ Functions: merge_native_lists(), merge_native_dicts()
+
+Stage 6: Parquet Storage
+         ↓ Schema: parquet_schema() - JSON Strings (pa.string)
+         ↓ Purpose: Persistent storage with compatibility
 ```
 
-### Complete End-to-End Flow
+### Data Type Evolution by Stage
 
 ```
-CSV Input → Processing → Grouping → Merging → Storage → Loading → Rollup Merging → Reporting
-    ↓           ↓           ↓          ↓         ↓         ↓            ↓               ↓
-collector → dataframe → dataframe → parquet → dataframe → dataframe →     Output
- schema      schema      schema     schema     schema     schema      
-    ↓           ↓           ↓          ↓         ↓         ↓            ↓               ↓
-String      Datetime   Datetime   timestamp   Datetime   Datetime    Excel
-types       objects    objects     [us]       objects    objects     Report
-    ↓           ↓           ↓          ↓         ↓         ↓            ↓               ↓
-Raw CSV    Working    Working     Storage    Working    Working     Final
-Data       Types      Types       Types      Types      Types      Report
-    ↓           ↓           ↓          ↓         ↓         ↓            ↓               ↓
- Initial    After       After      Before     After     Cross-Date   Final
- Load      group()     merge()    Storage    Load      Aggregate   Report
+Stages 1:     JSON Strings      (Raw CSV)
+Stage 2:      Native Types      (Input Boundary)
+Stages 3-5:   Native Types      (Processing Core)
+Stage 6:      JSON Strings      (Parquet Storage)
 ```
 
-## Centralized Schema-Driven Architecture
+### Schema Method Usage by Stage
 
-The metrics utility now implements a comprehensive schema-driven architecture that centralizes all data validation, type casting, and column management in the base class, ensuring consistent processing across all dataframe engines.
+```
+Stage 1: collector_schema()           → JSON Strings (pa.string)
+Stage 3: collector_dataframe_schema() → Native Types (Struct/List)
+Stage 5: dataframe_schema()           → Native Types (Struct/List)
+Stage 6: parquet_schema()             → JSON Strings (pa.string)
+```
 
-### Base Class Responsibilities (metrics_utility/automation_controller_billing/dataframe_engine/base.py)
+## Validation Rules
 
-The `Base` class provides centralized schema operations that handle:
+### Stage Validation
+1. **Stage 1**: Use PyArrow schema validation for CSV structure
+2. **Stages 3-5**: Use Polars native type operations - no explicit validation needed
+3. **Stage 6**: Use PyArrow schema validation for storage format
 
-1. **Schema Application**: `apply_complete_schema()` method applies proper types, adds missing columns, and enforces consistent ordering
-2. **Data Validation**: `validate_collector_dataframe()` filters invalid records based on validation rules  
-3. **Type Casting**: Automatic conversion between different schema types (collector_dataframe → dataframe → parquet)
-4. **Column Management**: Ensures all required columns are present with appropriate defaults
-5. **Complex Type Handling**: Manages JSON strings, collections, and facts using standardized merge operations
+### Schema Consistency
+- `collector_dataframe_schema()` and `dataframe_schema()` MUST be identical
+- Both MUST use native Polars types for all complex columns
+- `collector_schema()` and `parquet_schema()` use JSON strings for compatibility
 
-### Wrapper Class Responsibilities
+## Error Handling
 
-Dataframe wrapper classes (DataframeJobhostSummaryUsage, DataframeContentUsage, etc.) focus purely on:
+### Type Conversion Failures
+- Always provide safe defaults (empty dict `{}`, empty list `[]`)
+- Log conversion errors but continue processing
+- Use `map_elements()` with proper error handling
 
-1. **Schema Definitions**: Define schemas at the top of the class using static methods
-2. **Business Logic**: Implement domain-specific transformations and processing rules
-3. **Validation Rules**: Specify data quality requirements via `collector_dataframe_validation_schema()`
-4. **Aggregation Logic**: Define how to group and merge data using `group()` and `regroup()` methods
+### Aggregation Failures  
+- Graceful degradation for invalid data types
+- Preserve valid data when some records fail
+- Comprehensive error logging with OpenTelemetry spans
 
-### Clear Separation of Concerns
+## Performance Considerations
 
-- **Base Class**: Handles all technical schema operations, validation, and data infrastructure
-- **Wrapper Classes**: Handle only business logic and schema definitions specific to their data domain
-- **No Duplication**: Schema operations are never implemented inline in wrapper classes
-- **Consistent Interface**: All wrappers use the same standardized schema application flow
+### Memory Efficiency
+- Native types reduce memory overhead vs JSON strings
+- Process in batches for large datasets
+- Use lazy evaluation where possible
 
-This architecture ensures:
-- **Maintainability**: Schema logic is centralized and not duplicated across wrappers
-- **Consistency**: All data processing follows the same schema validation pipeline  
-- **Reliability**: Data quality is enforced automatically without manual intervention
-- **Performance**: Schema operations are optimized and cached where possible
+### Processing Speed
+- Native Polars operations are significantly faster than JSON manipulation
+- Batch operations reduce overhead
+- Minimize type conversions (only at boundaries)
+
+## Integration Points
+
+### Base Class Integration
+- Schema validation handled by base class methods
+- Type conversion logic in dataframe-specific transformation methods  
+- Aggregation patterns implemented in `group()` and `regroup()` methods
+
+### OpenTelemetry Tracing
+- Track performance at each stage boundary
+- Monitor type conversion overhead
+- Log aggregation performance metrics
+
+## Examples
+
+### Complete Pipeline Example
+```python
+# Stage 1: Raw CSV with JSON strings
+csv_data = pd.read_csv("data.csv")  # canonical_facts as JSON string
+
+# Stage 2: Convert to native types
+df = csv_data.with_columns([
+    csv_data['canonical_facts'].map_elements(convert_json_to_dict, return_dtype=pd.Object).alias('canonical_facts')
+])
+
+# Stages 3-5: All processing with native types
+grouped = df.group_by(['host_name']).agg([
+    pd.col('canonical_facts').map_batches(
+        lambda s: pd.Series([merge_native_dicts(s.to_list())]),
+        return_dtype=pd.Object
+    ).first().alias('canonical_facts')
+])
+
+# Stage 6: Convert back to JSON for storage and write to parquet
+storage_ready = grouped.with_columns([
+    grouped['canonical_facts'].map_elements(convert_dict_to_json, return_dtype=pd.Utf8).alias('canonical_facts')
+])
+storage_ready.write_parquet("output.parquet")
+```
+
+This data flow ensures optimal performance during processing while maintaining compatibility with storage systems and external interfaces. The clean separation of concerns prevents data corruption and ensures consistent behavior across all dataframe engines.

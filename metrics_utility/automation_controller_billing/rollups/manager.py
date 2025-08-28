@@ -667,38 +667,19 @@ class RollupManager:
             self.logger.warning(f'Dataframe for {dataframe_name} is empty - no data available')
             return self.save_no_data_metadata(target_date, dataframe_name)
 
-        # Polars-compatible parquet storage
-        import json
-        df_for_parquet = df.clone()
+        # Use generic schema-based serialization to convert from dataframe_schema to parquet storage format
+        if hasattr(dataframe_obj, 'serialize_dataframe_to_parquet_schema'):
+            df_for_parquet = dataframe_obj.serialize_dataframe_to_parquet_schema(df)
+        else:
+            # Fallback for old-style dataframes
+            df_for_parquet = df.clone()
         
-        # NOTE: Polars DataFrames don't have pandas-style indexes, so no need to reset_index
-        # This simplifies the code significantly compared to pandas
-        
-        # For now, save the Polars DataFrame directly to parquet
-        # Polars handles complex data types better than pandas for parquet storage
+        # Write to parquet - all complex types are now JSON strings, which parquet handles natively
         try:
             df_for_parquet.write_parquet(parquet_path)
         except Exception as e:
-            # If direct parquet write fails, try to convert problematic types to strings
-            self.logger.warning(f'Direct parquet write failed for {dataframe_name}, attempting type conversion: {e}')
-            
-            # Convert any remaining complex types to JSON strings for parquet compatibility
-            import polars as pl
-            
-            for col in df_for_parquet.columns:
-                # Check if column contains complex types that parquet can't handle
-                dtype_str = str(df_for_parquet[col].dtype)
-                if 'List' in dtype_str or 'Struct' in dtype_str or 'Object' in dtype_str:
-                    # Convert complex types to JSON strings with proper return type
-                    df_for_parquet = df_for_parquet.with_columns(
-                        df_for_parquet[col].map_elements(
-                            lambda x: json.dumps(x, default=str) if x is not None else None,
-                            return_dtype=pl.Utf8
-                        ).alias(col)
-                    )
-            
-            # Try parquet write again with converted types
-            df_for_parquet.write_parquet(parquet_path)
+            self.logger.error(f'Failed to write parquet file {parquet_path}: {e}')
+            raise
 
         # Save enhanced metadata file with validation metrics from OpenTelemetry tracing
         metadata = {

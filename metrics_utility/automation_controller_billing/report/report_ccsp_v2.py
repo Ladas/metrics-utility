@@ -813,8 +813,18 @@ class ReportCCSPv2(Base):
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'job_remote_id' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame(columns=['organization_name', 'job_runs', 'host_runs_unique', 'host_runs', 'task_runs'])
+            ccsp_report_dataframe = pd.DataFrame({
+                'organization_name': [],
+                'job_runs': [],
+                'host_runs_unique': [],
+                'host_runs': [],
+                'task_runs': []
+            })
         else:
+            # Get optional sheets configuration early to avoid UnboundLocalError
+            optional_sheets = self.optional_report_sheets()
+            print(f"DEBUG: optional_report_sheets = {optional_sheets}")
+            
             # Create combined column for Polars compatibility
             dataframe = dataframe.with_columns(
                 pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid')
@@ -832,8 +842,6 @@ class ReportCCSPv2(Base):
             }
 
             # Add the INDIRECT aggregations only if the condition is met
-            optional_sheets = self.optional_report_sheets()
-            print(f"DEBUG: optional_report_sheets = {optional_sheets}")
             if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
                 agg_dict['indirect_host_runs_unique'] = ('host_name', 'nunique')  # Count all for now
                 agg_dict['indirect_host_runs'] = ('host_name', 'count')  # Count all for now
@@ -924,6 +932,10 @@ class ReportCCSPv2(Base):
         print(f"DEBUG: Renaming columns: {list(filtered_rename_columns.keys())}")
         
         ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, filtered_rename_columns)
+
+        # Sort by organization name to ensure consistent ordering for tests
+        if 'Organization name' in ccsp_report_dataframe.columns:
+            ccsp_report_dataframe = ccsp_report_dataframe.sort('Organization name')
 
         row_counter = 0
         rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)

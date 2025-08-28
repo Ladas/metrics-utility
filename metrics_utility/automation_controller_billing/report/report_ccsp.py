@@ -279,7 +279,10 @@ class ReportCCSP(Base):
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'host_name' not in dataframe.columns:
             # Create empty dataframe with expected structure for empty case
-            ccsp_report = pd.DataFrame(columns=['organization_name', 'quantity_consumed'])
+            ccsp_report = pd.DataFrame({
+                'organization_name': [],
+                'quantity_consumed': []
+            })
         else:
             # Use Polars-compatible groupby
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame

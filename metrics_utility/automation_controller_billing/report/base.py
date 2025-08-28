@@ -106,6 +106,10 @@ class Base:
         return labels
 
     def convert_cell(self, cell):
+        # If the cell is a Polars Series (from List column), convert to Python list first
+        if hasattr(cell, 'to_list'):  # Polars Series object
+            cell = cell.to_list()
+        
         # If the cell is a dictionary, convert each set value to a sorted list, then dump as a JSON string.
         if isinstance(cell, dict):
             new_cell = {k: sorted(list(v)) if isinstance(v, set) else v for k, v in cell.items()}
@@ -170,26 +174,17 @@ class Base:
             ws.column_dimensions[get_column_letter(key)].width = value
 
     def _fix_event_host_names(self, mapping_dataframe, destination_dataframe):
-        print("DEBUG: _fix_event_host_names starting...")
         if destination_dataframe is None:
-            print("DEBUG: destination_dataframe is None, returning None")
             return None
 
         # Check for empty dataframes
         if mapping_dataframe is None or len(mapping_dataframe) == 0:
-            print("DEBUG: mapping_dataframe is empty, returning destination_dataframe unchanged")
             return destination_dataframe
 
         if len(destination_dataframe) == 0:
-            print("DEBUG: destination_dataframe is empty, returning unchanged")
             return destination_dataframe
 
-        print(f"DEBUG: Processing mapping_dataframe with {len(mapping_dataframe)} records")
-        print(f"DEBUG: Processing destination_dataframe with {len(destination_dataframe)} records")
-
         # Use efficient Polars operations instead of slow map_rows
-        print("DEBUG: Creating mapping composite ID using string concatenation...")
-        
         # Create composite ID for mapping dataframe using Polars string operations
         mapping_dataframe = mapping_dataframe.with_columns([
             (pd.col('original_host_name').cast(str) + '__' + 
@@ -197,22 +192,16 @@ class Base:
              pd.col('job_remote_id').cast(str)).alias('host_composite_id')
         ])
         
-        print("DEBUG: Creating mapping dictionary...")
         # Convert to dictionary for mapping using Polars
         mapping_rows = mapping_dataframe.select(['host_composite_id', 'host_name']).to_dicts()
         mapping_dict = {row['host_composite_id']: str(row['host_name']) for row in mapping_rows}
-        
-        print(f"DEBUG: Created mapping dictionary with {len(mapping_dict)} entries")
 
         # Create composite ID for destination dataframe using Polars operations
-        print("DEBUG: Creating destination composite ID...")
         destination_dataframe = destination_dataframe.with_columns([
             (pd.col('host_name').cast(str) + '__' + 
              pd.col('install_uuid').cast(str) + '__' + 
              pd.col('job_remote_id').cast(str)).alias('host_composite_id_temp')
         ])
-        
-        print("DEBUG: Applying host name mapping...")
         # Apply mapping using efficient join operation instead of map_rows
         mapping_df = pd.DataFrame([
             {'host_composite_id_temp': k, 'mapped_host_name': v} 
@@ -242,7 +231,6 @@ class Base:
              pd.col('job_remote_id').cast(str)).alias('host_composite_id')
         ])
 
-        print("DEBUG: _fix_event_host_names completed successfully")
         return destination_dataframe
 
     def _build_data_section_scope(self, current_row, ws, dataframe, mode=None):
@@ -292,6 +280,10 @@ class Base:
 
         labels = {k: v for k, v in labels.items() if k in columns}
         ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, labels)
+
+        # Sort by host name to ensure consistent ordering for tests
+        if self.HOST_NAME in ccsp_report_dataframe.columns:
+            ccsp_report_dataframe = ccsp_report_dataframe.sort(self.HOST_NAME)
 
         row_counter = 0
         rows = dataframe_to_rows(self.to_pandas_for_excel(ccsp_report_dataframe), index=False)
@@ -479,22 +471,6 @@ class Base:
             }
             ccsp_report_dataframe = pd.DataFrame(empty_data)
         else:
-            print(f"DEBUG REPORT: Input dataframe has {len(dataframe)} records")
-            print(f"DEBUG REPORT: Input dataframe columns: {dataframe.columns}")
-            print(f"DEBUG REPORT: Input hosts: {sorted(dataframe['host_name'].unique().to_list())}")
-            
-            # Check for missing hosts specifically
-            missing_hosts = ['manually_created_host_1', 'test_host_42']
-            for missing_host in missing_hosts:
-                if missing_host in dataframe['host_name'].to_list():
-                    print(f"DEBUG REPORT: ✓ {missing_host} FOUND in input dataframe")
-                    host_records = dataframe.filter(dataframe['host_name'] == missing_host)
-                    print(f"DEBUG REPORT:   Records for {missing_host}: {len(host_records)}")
-                    if len(host_records) > 0:
-                        sample = host_records.head(1).to_dicts()[0]
-                        print(f"DEBUG REPORT:   Sample: {sample}")
-                else:
-                    print(f"DEBUG REPORT: ✗ {missing_host} MISSING from input dataframe")
             agg_dict = {
                 'organizations': ('organization_name', 'nunique'),
                 'host_runs': ('host_name', 'count'),
@@ -531,17 +507,14 @@ class Base:
                 if 'facts' in dataframe.columns:
                     agg_exprs.append(pd.col('facts').first().alias('facts_list'))
             except Exception as e:
-                print(f"DEBUG: Error setting up complex field aggregations: {e}")
                 # Continue with basic aggregations only
+                pass
             
             # Add dedup aggregation if enabled
             if self.has_dedup_enabled():
                 agg_exprs.append(pd.col('host_names_before_dedup').first().alias('host_names_before_dedup'))
             
             ccsp_report_dataframe = dataframe.group_by('host_name').agg(agg_exprs)
-            
-            print(f"DEBUG: After grouping, dataframe has {len(ccsp_report_dataframe)} records")
-            print(f"DEBUG: Hosts after grouping: {sorted(ccsp_report_dataframe['host_name'].to_list())}")
             
             # Now apply the complex merge functions to the collected lists safely
             try:
@@ -585,12 +558,9 @@ class Base:
                     complex_columns.append(pd.lit({}).alias('facts'))
                 
                 ccsp_report_dataframe = ccsp_report_dataframe.with_columns(complex_columns)
-                print(f"DEBUG: After map_elements, dataframe has {len(ccsp_report_dataframe)} records")
-                print(f"DEBUG: Hosts after map_elements: {sorted(ccsp_report_dataframe['host_name'].to_list())}")
             except Exception as e:
-                print(f"DEBUG: Error during map_elements: {e}")
-                print(f"DEBUG: Proceeding without complex field processing")
                 # Fallback - just use empty values for complex fields
+                pass
                 ccsp_report_dataframe = ccsp_report_dataframe.with_columns([
                     pd.lit([]).alias('managed_node_types_set'),
                     pd.lit([]).alias('events'),
@@ -695,7 +665,13 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'collection_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame(columns=['collection_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+            ccsp_report_dataframe = pd.DataFrame({
+                'collection_name': [],
+                'host_runs_unique': [],
+                'host_runs': [],
+                'task_runs': [],
+                'duration': []
+            })
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {
@@ -757,7 +733,13 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'role_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame(columns=['role_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+            ccsp_report_dataframe = pd.DataFrame({
+                'role_name': [],
+                'host_runs_unique': [],
+                'host_runs': [],
+                'task_runs': [],
+                'duration': []
+            })
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {
@@ -820,7 +802,13 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'module_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame(columns=['module_name', 'host_runs_unique', 'host_runs', 'task_runs', 'duration'])
+            ccsp_report_dataframe = pd.DataFrame({
+                'module_name': [],
+                'host_runs_unique': [],
+                'host_runs': [],
+                'task_runs': [],
+                'duration': []
+            })
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {

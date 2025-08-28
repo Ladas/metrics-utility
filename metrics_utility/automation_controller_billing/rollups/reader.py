@@ -190,23 +190,30 @@ class RollupReader:
 
                     if os.path.exists(parquet_path):
                         try:
-                            # Load parquet data directly - minimal processing to avoid corruption
-                            # Use Polars for consistency with the rest of the codebase
-                            import polars as pl
-                            df = pl.read_parquet(parquet_path)
-                            
-                            # Only do minimal transformations for specific dataframes
-                            if df_name == 'DataframeJobhostSummaryUsage':
-                                # Convert lists back to sets for known set columns (critical for proper aggregation)
-                                df = self._convert_lists_to_sets(df, df_name)
-                                # Apply JSON normalization for canonical_facts and facts
-                                df = self._normalize_dataframe_types(df, df_name)
-                            elif df_name == 'DataframeInventoryScope':
-                                # Convert lists back to sets for known set columns (critical for proper aggregation)
-                                df = self._convert_lists_to_sets(df, df_name)
-                                # Apply JSON normalization for canonical_facts and facts
-                                df = self._normalize_dataframe_types(df, df_name)
-                            # For DataframeContentUsage and DataframeCollectionStatus, use raw parquet data
+                            # CRITICAL: Use dataframe class load_from_parquet method for proper Object type handling
+                            # This ensures schema consistency and handles legacy Object types in parquet files
+                            dataframe_class = self._get_dataframe_class(df_name)
+                            if dataframe_class:
+                                # Create temporary instance to access load_from_parquet method
+                                df_instance = dataframe_class(extractor=None, month=None, extra_params={})
+                                df = df_instance.load_from_parquet(parquet_path)
+                            else:
+                                # Fallback to direct loading if dataframe class not found
+                                import polars as pl
+                                df = pl.read_parquet(parquet_path)
+                                
+                                # Only do minimal transformations for specific dataframes
+                                if df_name == 'DataframeJobhostSummaryUsage':
+                                    # Convert lists back to sets for known set columns (critical for proper aggregation)
+                                    df = self._convert_lists_to_sets(df, df_name)
+                                    # Apply JSON normalization for canonical_facts and facts
+                                    df = self._normalize_dataframe_types(df, df_name)
+                                elif df_name == 'DataframeInventoryScope':
+                                    # Convert lists back to sets for known set columns (critical for proper aggregation)
+                                    df = self._convert_lists_to_sets(df, df_name)
+                                    # Apply JSON normalization for canonical_facts and facts
+                                    df = self._normalize_dataframe_types(df, df_name)
+                                # For DataframeContentUsage and DataframeCollectionStatus, use raw parquet data
 
                             if merged_dataframes[df_name] is None:
                                 merged_dataframes[df_name] = df
