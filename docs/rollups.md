@@ -25,10 +25,12 @@ docker compose -f tools/docker/docker-compose.yaml exec metrics-utility-env uv r
 
 ## Overview
 
-The rollup system consists of two main phases:
+The rollup system provides a unified architecture for pre-computing and loading daily aggregated dataframes:
 
-1. **Rollup Computation**: Daily processing that generates and stores aggregated dataframes as parquet files
-2. **Report Generation**: Loading pre-computed parquet files to generate reports quickly
+- **Rollup Computation**: Generates daily aggregated dataframes using Polars for efficient processing and stores them as parquet files
+- **Report Generation**: Loads pre-computed parquet files with schema consistency and merges them using Polars operations
+- **Data Integrity**: Enforces strict validation of unique index columns and proper aggregation operations
+- **Error Handling**: Comprehensive error detection for missing operations and data integrity violations
 
 ## Architecture
 
@@ -114,30 +116,6 @@ Versions are identified by timestamp with microsecond precision to prevent confl
 - **Smart loading**: Reports automatically merge only available data versions, skipping status versions
 - **Graceful degradation**: Reports generate with partial data when some dates have no source data
 
-## Unified Data Loading Architecture (Phase 1 Complete)
-
-### Overview
-
-The unified data loading architecture eliminates the 5x redundant I/O problem by reading each tarball exactly once and distributing data to all dataframe builders simultaneously. This represents a major architectural improvement that provides immediate performance benefits while maintaining code consistency.
-
-### Key Architecture Components
-
-**Core Factory Classes:**
-- `RollupDataframeFactory` - Main factory for unified data loading and rollup creation
-- `RollupManager` - Handles rollup storage, versioning, and metadata tracking
-- `RollupReader` - Loads and merges rollup dataframes with schema consistency
-
-**Dataframe Classes with Unified Interface:**
-- `DataframeJobhostSummaryUsage` - Managed nodes processing (handles both job_host_summary and indirect_nodes)
-- `DataframeContentUsage` - Content usage processing (main_jobevent)
-- `DataframeInventoryScope` - Inventory scope processing (main_host)
-- `DataframeCollectionStatus` - Collection status processing (data_collection_status)
-
-**Base Class Features:**
-- `Base.load_from_parquet()` - Schema-consistent parquet loading
-- `Base.merge()` - Dataframe merging with mixed type comparison protection
-- `Base.summarize_merged_dataframes()` - Safe aggregation operations with error handling
-
 ## Rollup Computation Flow with Unified Architecture
 
 ```mermaid
@@ -181,82 +159,45 @@ graph TD
     FF -->|No| GG[Complete rollup computation]
 ```
 
-## Report Generation from Rollups with Unified Architecture
+## Report Generation from Rollups
 
 ```mermaid
 graph TD
     A[build_report.py Command.handle] --> B[Parse date range --since --until]
-    B --> C[Create ExtractorFactory with ship_target: ExtractorDirectory]
-    C --> D[Create RollupDataframeFactory with unified loading]
-    D --> E[RollupDataframeFactory.create]
-    E --> F[Check date range parameters opt_since/opt_until and month]
-    F --> H[Use rollup-based report generation]
+    B --> C[Create ExtractorFactory and RollupDataframeFactory]
+    C --> D[RollupDataframeFactory.create]
+    D --> E[Check rollups availability with source data scanning]
+    E --> F{Missing or stale rollups?}
+    F -->|Yes| G[Auto-compute missing/stale rollups]
+    F -->|No| H[Load existing rollups]
+    G --> H
     
-    H --> J[RollupReader.check_rollups_with_source_data]
-    J --> K[RollupManager.scan_rollups_directory]
-    K --> L[ExtractorDirectory.scan_tarballs_for_date]
-    L --> M[RollupManager.identify_stale_rollups]
-    M --> N{Missing or stale rollups found?}
-    N -->|Yes| O[Auto-compute missing/stale rollups via compute_rollups Command]
-    N -->|No| P[Use existing rollups via RollupDataframeFactory._create_from_rollups]
-    O --> Q[RollupDataframeFactory._compute_rollup_for_batch_task]
-    Q --> P
+    H --> I[RollupReader.load_rollup_dataframes]
+    I --> J[For each date and required dataframe]
+    J --> K[Load parquet with schema consistency]
+    K --> L[Merge daily data using dataframe class operations]
+    L --> M[Accumulate merged results]
+    M --> N{More dates?}
+    N -->|Yes| J
+    N -->|No| O[Map to standard names for reports]
     
-    P --> T[RollupReader.load_rollup_dataframes]
-    T --> V[For each date/DataframeClass combination]
-    V --> W[DataframeClass.load_from_parquet with schema consistency via Base class]
-    W --> X[Base._ensure_complete_schema adds missing columns]
-    X --> Y[Base._apply_consistent_casting for merge compatibility]
-    Y --> Z[Base._apply_consistent_indexing using unique_index_columns]
-    Z --> AA[RollupReader._merge_using_dataframe_class]
-    AA --> BB[DataframeClass.merge for proper aggregation logic with mixed type protection]
-    BB --> CC[Accumulate in dict: DataframeClassName -> merged_dataframe]
-    CC --> DD{More dates for same DataframeClass?}
-    DD -->|Yes| EE[DataframeClass.merge with accumulated dataframe]
-    DD -->|No| FF[Complete for this DataframeClass]
-    EE --> CC
-    FF --> GG[RollupDataframeFactory._create_from_rollups mapping to standard names]
-    GG --> HH[Return actual pandas DataFrames for report generation]
-    HH --> II[Apply deduplication using DedupFactory]
-    II --> JJ{Any data loaded?}
-    JJ -->|No| KK[Generate empty report with warnings]
-    JJ -->|Yes| LL[Generate report with deduplicated data]
-    KK --> MM[ReportSaverFactory.save XLSX report]
-    LL --> MM
+    O --> P[Apply deduplication]
+    P --> Q{Data available?}
+    Q -->|No| R[Generate empty report with warnings]
+    Q -->|Yes| S[Generate report with data]
+    R --> T[Save XLSX report]
+    S --> T
 
-    subgraph "Unified Data Loading Benefits (Phase 1)"
-        S --> S1[Single tarball read per date eliminates 5x I/O]
-        S --> S2[Shared batch_data_iterator across all dataframes]
-        S --> S3[Generic duplicate handling via DataframeClass.merge operations]
-        S --> S4[Consistent schema via Base.load_from_parquet]
+    subgraph "Schema Consistency"
+        K --> K1[Ensure complete schema]
+        K --> K2[Apply consistent casting]
+        K --> K3[Handle missing columns]
     end
 
-    subgraph "Schema Consistency Flow (Base Class)"
-        W --> W1[Base._ensure_complete_schema adds missing columns]
-        W --> W2[Base._apply_consistent_casting with proper types]
-        W --> W3[Base._apply_consistent_indexing for merge compatibility]
-        W --> W4[DataframeClass.get_default_value_for_column]
-    end
-
-    subgraph "Mixed Type Error Handling (Base.summarize_merged_dataframes)"
-        BB --> BB1[try min/max operations on datetime columns]
-        BB --> BB2[catch TypeError for float vs Timestamp comparisons]
-        BB --> BB3[logger.warning with specific column and error details]
-        BB --> BB4[Use safe_min/safe_max with proper NaN handling]
-    end
-
-    subgraph "Rollup Reader Simplified Merging"
-        AA --> AA1[Get DataframeClass instance for operations]
-        AA --> AA2[Use DataframeClass.merge with existing logic]
-        AA --> AA3[Leverage unique_index_columns and operations]
-        AA --> AA4[OpenTelemetry tracing for performance monitoring]
-    end
-
-    subgraph "Standard Factory Name Mapping (RollupDataframeFactory)"
-        CC --> CC1[DataframeJobhostSummaryUsage -> job_host_summary]
-        CC --> CC2[DataframeContentUsage -> main_jobevent]
-        CC --> CC3[DataframeInventoryScope -> main_host]
-        CC --> CC4[DataframeCollectionStatus -> data_collection_status]
+    subgraph "Error Handling"
+        L --> L1[Mixed type comparison protection]
+        L --> L2[Safe min/max operations with NaN handling]
+        L --> L3[Detailed error logging]
     end
 ```
 
@@ -286,13 +227,14 @@ The rollup system stores aggregated dataframes that directly correspond to repor
 - `DataframeInventoryScope.build_dataframe(batch_data_iterator)` - Process main_host data
 - `DataframeCollectionStatus.build_dataframe(batch_data_iterator)` - Process data_collection_status data
 
-**Base Class Features:**
-- `Base.load_from_parquet(parquet_path)` - Schema-consistent parquet loading
-- `Base.merge(rollup, new_group)` - Safe dataframe merging with error handling
-- `Base.summarize_merged_dataframes()` - Protected min/max operations with mixed type handling
-- `Base._ensure_complete_schema()` - Add missing columns with proper defaults
-- `Base._apply_consistent_casting()` - Type consistency for merge compatibility
-- `Base._apply_consistent_indexing()` - Index alignment using unique_index_columns
+**Base Class Features (Polars Implementation):**
+- `Base.load_from_parquet(parquet_path)` - Schema-consistent parquet loading with complex type handling
+- `Base.merge(rollup, new_group)` - Safe dataframe merging with schema alignment and data integrity checks
+- `Base.summarize_merged_dataframes()` - Enforced operation definitions with _right column validation
+- `Base._ensure_complete_schema()` - Add missing columns with proper defaults and type compatibility
+- `Base._apply_consistent_casting()` - Polars-native type consistency for merge compatibility
+- `Base._clean_right_columns()` - Remove conflicting _right columns before join operations
+- `Base._align_schemas_for_join()` - Ensure compatible schemas with type conversion for joins
 
 **RollupReader (Rollup Loading):**
 - `RollupReader.load_rollup_dataframes()` - Load and merge rollups with schema consistency
@@ -307,20 +249,37 @@ The rollup system stores aggregated dataframes that directly correspond to repor
 
 ## Error Handling and Data Quality
 
-### Mixed Type Comparison Protection
+### Data Integrity and Operation Validation
 
-The system includes comprehensive protection against mixed type comparison errors that can occur when processing real-world data:
+The system includes comprehensive data integrity checks and operation validation:
 
 ```python
-# In Base.summarize_merged_dataframes()
-try:
-    df[col] = df[[col_x, col_y]].min(axis=1, skipna=True)
-except TypeError as e:
-    if 'not supported between instances' in str(e):
-        logger.warning(f'Mixed type comparison detected for column {col} during min operation: {e}. Using safe comparison fallback.')
-        # Use safe_min function with proper NaN and type handling
-        df[col] = df.apply(safe_min, axis=1)
+# In Base.summarize_merged_dataframes() - Polars implementation
+if operations.get(col) == 'min':
+    try:
+        # Use Polars min_horizontal for proper column-wise operation
+        df = df.with_columns(
+            pd.min_horizontal([left_col, right_col]).alias(col)
+        )
+    except TypeError as e:
+        if 'not supported between instances' in str(e):
+            logger.warning(f'Mixed type comparison detected for column {col} during min operation: {e}. Using safe comparison fallback.')
+            # Use coalesce approach for mixed types
+            df = df.with_columns(df[left_col].fill_null(df[right_col]).alias(col))
+else:
+    # CRITICAL: Missing operation definition is a configuration error
+    raise ValueError(
+        f"Missing operation definition for column '{col}' during merge in {dataframe_class_name}.\n"
+        f"  Required action: Add '{col}: \"operation_name\"' to the operations() method.\n"
+        f"  Valid operations: 'min', 'max', 'sum', 'combine_set', 'combine_json', 'combine_json_values'"
+    )
 ```
+
+**Critical Data Integrity Checks:**
+- **Unique Index Validation**: Detects `_right` columns on unique index columns, indicating improper grouping
+- **Operation Enforcement**: Requires explicit operation definitions for all merge conflicts
+- **Schema Alignment**: Ensures compatible schemas before join operations with type conversion
+- **_right Column Cleanup**: Verifies complete removal of suffix columns after merge operations
 
 **Common Protected Operations:**
 - `first_automation` min operations - handles float NaN vs Timestamp comparisons
@@ -388,14 +347,15 @@ python manage.py build_report --month=2025-03 --force
 
 ## Performance Benefits
 
-Rollups provide significant performance improvements by pre-computing daily aggregations:
+Rollups with Polars provide significant performance improvements:
 
 - **5x I/O Reduction**: Unified data loading reads each tarball exactly once instead of 5 times
-- **Faster report generation**: Reports load pre-aggregated parquet files instead of processing raw CSV data
-- **Memory Efficiency**: Single-pass processing with shared batch iterators
-- **Reduced CPU usage**: Pre-computed aggregations eliminate repeated calculations
-- **Schema Consistency**: Unified parquet loading ensures compatible dataframes for merging
-- **Mixed Type Protection**: Safe comparison operations prevent processing failures
+- **Polars Performance**: Native Rust implementation provides 2-10x faster processing than pandas
+- **Memory Efficiency**: Polars lazy evaluation and optimized memory usage with shared batch iterators
+- **Schema Consistency**: Unified parquet loading with automatic type compatibility ensures reliable merging
+- **Data Integrity Enforcement**: Strict validation prevents silent data corruption during merge operations
+- **Native Parquet Support**: Optimized parquet I/O with columnar storage and predicate pushdown
+- **Type Safety**: Polars strong typing prevents runtime errors common in pandas workflows
 
 ## Rollup Management
 
@@ -513,9 +473,122 @@ export OTEL_SERVICE_NAME=metrics-utility
 docker compose -f tools/docker/docker-compose.yaml --profile=otel up -d
 ```
 
+## Schema-Driven Architecture
+
+The rollup system is built on a comprehensive schema-driven architecture that ensures data consistency and quality across all processing stages.
+
+### Base Class Schema System
+
+The `Base` class (`metrics_utility/automation_controller_billing/dataframe_engine/base.py`) provides centralized schema operations that all dataframe engines inherit:
+
+#### Core Schema Methods
+
+**Schema Application**:
+```python
+apply_complete_schema(df, schema_type="dataframe", operation_context="after_grouping")
+```
+- Applies proper types, adds missing columns with defaults, enforces consistent ordering
+- Supports three schema types: `collector_dataframe`, `dataframe`, `parquet`
+- Provides detailed debug logging for troubleshooting schema issues
+
+**Data Validation**:
+```python
+validate_collector_dataframe(df) -> pd.DataFrame
+```
+- Filters invalid records based on validation rules from `collector_dataframe_validation_schema()`
+- Tracks data quality metrics (rows filtered, quality ratio, validation failures)
+- Logs significant data quality issues automatically
+
+#### Schema Pipeline Flow
+
+1. **CSV Processing** → `collector_dataframe_schema()` applied
+2. **After Grouping** → `dataframe_schema()` applied  
+3. **Before Storage** → `parquet_schema()` applied
+4. **After Loading** → `dataframe_schema()` restored
+5. **During Merging** → Schema consistency enforced
+
+### Wrapper Class Responsibilities
+
+Each dataframe wrapper (DataframeJobhostSummaryUsage, DataframeContentUsage, etc.) defines:
+
+#### Required Static Methods
+
+```python
+@staticmethod
+def collector_dataframe_schema() -> Dict[str, str]:
+    """Schema for processed CSV data (before grouping)"""
+    return {
+        'host_name': 'String',
+        'task_runs': 'Int64',
+        'created': 'Datetime',
+        # ...
+    }
+
+@staticmethod  
+def dataframe_schema() -> Dict[str, str]:
+    """Schema for working dataframes (after grouping)"""
+    return {
+        'host_name': 'String', 
+        'first_automation': 'Datetime',
+        'last_automation': 'Datetime',
+        # ...
+    }
+
+@staticmethod
+def parquet_schema() -> pa.Schema:
+    """PyArrow schema for parquet storage"""
+    return pa.schema([
+        pa.field("host_name", pa.string()),
+        pa.field("first_automation", pa.timestamp('us')),
+        # ...
+    ])
+
+@staticmethod
+def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
+    """Validation rules for data quality control"""
+    return {
+        'host_name': {'required': True, 'allow_null': False},
+        'task_runs': {'required': True, 'min_value': 0},
+        # ...
+    }
+```
+
+#### Business Logic Methods
+
+```python
+def _process_batch_data(self, batch_data, current_span):
+    """Process individual batch with domain-specific logic"""
+    # 1. Validate CSV data
+    # 2. Apply business transformations  
+    # 3. Call apply_complete_schema()
+    
+def group(self, dataframe):
+    """Group and aggregate data using Polars operations"""
+    
+def regroup(self, dataframe): 
+    """Regroup pre-aggregated data during rollup merging"""
+```
+
+### Clear Separation of Concerns
+
+- **Base Class**: Handles all technical schema operations, validation, and data infrastructure
+- **Wrapper Classes**: Define only business logic and schema definitions specific to their data domain
+- **No Duplication**: Schema operations are never implemented inline in wrapper classes
+- **Consistent Interface**: All wrappers follow the same schema application pipeline
+
+### Data Quality Benefits
+
+This architecture provides:
+- **Automatic Type Safety**: All data conforms to defined schemas throughout processing
+- **Data Quality Filtering**: Invalid records are automatically filtered with quality metrics
+- **Consistent Column Ordering**: Prevents concat/merge errors between dataframes
+- **Complex Type Support**: Proper handling of JSON strings, collections, and facts
+- **Performance Optimization**: Schema operations are cached and optimized
+
 ## Future Enhancements
 
 - **Distributed Processing**: Process date groups in parallel across multiple workers
 - **Hierarchical Rollups**: Create weekly/monthly rollups from daily rollups for faster long-term reporting
 - **Advanced Caching**: Intelligent caching strategies for frequently accessed rollup combinations
 - **Data Quality Monitoring**: Enhanced tracking and alerting for mixed type comparisons and data quality issues
+- **Schema Evolution**: Support for schema versioning and backward compatibility

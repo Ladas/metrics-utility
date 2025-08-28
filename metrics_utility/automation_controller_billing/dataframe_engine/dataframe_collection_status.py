@@ -78,10 +78,18 @@ class DataframeCollectionStatus(Base):
         return accumulated_dataframe if accumulated_dataframe is not None else self.empty()
 
     def _process_batch_data(self, batch, batch_data, date):
-        """Process individual batch data with comprehensive schema validation and data quality filtering."""
-        from opentelemetry import trace
-
+        """Process individual batch data using centralized schema-driven approach.
+        
+        This method uses the new validation system:
+        1. CSV validation using collector_schema
+        2. Business logic transformations (minimal for collection status)
+        3. Schema application with automatic validation via collector_dataframe_validation_schema
+        
+        All validation, type casting, and column completion is handled by the 
+        centralized schema system in the base class.
+        """
         from metrics_utility.tracing import add_span_attributes
+        from opentelemetry import trace
 
         current_span = trace.get_current_span()
 
@@ -91,138 +99,25 @@ class DataframeCollectionStatus(Base):
 
         input_row_count = len(batch)
 
-        # COMPREHENSIVE SCHEMA DEFINITION: Define complete schema with validation rules
-        required_schema = {
-            'collection_start_timestamp': {'type': str, 'required': True, 'allow_null': False},
-            'since': {'type': str, 'required': True, 'allow_null': False},
-            'until': {'type': str, 'required': True, 'allow_null': False},
-            'file_name': {'type': str, 'required': True, 'allow_null': False},
-            'status': {'type': str, 'required': True, 'allow_null': False},
-            'elapsed': {'type': float, 'required': True, 'allow_null': True, 'min_value': 0.0},
-        }
+        # Step 1: Validate CSV data against collector schema
+        batch = self.validate_collector_data(
+            batch,
+            strict_columns=['file_name', 'status'], 
+            default_values=self.get_collector_default_values()
+        )
+        
+        # Step 2: Apply complete collector_dataframe schema (includes validation)
+        batch = self.apply_complete_schema(batch, schema_type="collector_dataframe", operation_context="after_collection_status_transformations")
 
-        # Schema validation and data quality metrics
-        validation_metrics = {
-            'missing_columns': [],
-            'invalid_rows_count': 0,
-            'rows_with_wrong_types': 0,
-            'rows_with_null_required_fields': 0,
-            'rows_with_invalid_values': 0,
-            'total_input_rows': input_row_count,
-        }
-
-        # Add missing columns with proper defaults
-        for col, schema_def in required_schema.items():
-            if col not in batch.columns:
-                validation_metrics['missing_columns'].append(col)
-                col_type = schema_def['type']
-                if col_type == str:
-                    batch = batch.with_columns(pd.lit('').alias(col))
-                elif col_type == int:
-                    batch = batch.with_columns(pd.lit(0).cast(pd.Int64).alias(col))
-                elif col_type == float:
-                    batch = batch.with_columns(pd.lit(0.0).alias(col))
-
-        # Data quality validation and filtering - TEMPORARILY VERY PERMISSIVE FOR TESTING
-        # Since all validation is currently disabled, just keep all rows valid
-        # (The filtering logic below is all disabled with TEMPORARILY DISABLED comments)
-
-        for col, schema_def in required_schema.items():
-            col_type = schema_def['type']
-            required = schema_def['required']
-            allow_null = schema_def.get('allow_null', True)
-
-            # Type casting with error tracking
-            try:
-                if col_type == float:
-                    if col in batch.columns:
-                        try:
-                            if not allow_null:
-                                batch = batch.with_columns(batch[col].fill_null(value=0.0).cast(pd.Float64, strict=False).alias(col))
-                            else:
-                                batch = batch.with_columns(batch[col].cast(pd.Float64, strict=False).alias(col))
-                        except Exception:
-                            # If casting fails, try string-based approach
-                            try:
-                                if not allow_null:
-                                    batch = batch.with_columns(
-                                        batch[col]
-                                        .fill_null(value='0.0')
-                                        .cast(str)
-                                        .str.extract(r'([+-]?\d*\.?\d*)', 1)
-                                        .cast(pd.Float64, strict=False)
-                                        .alias(col)
-                                    )
-                                else:
-                                    batch = batch.with_columns(
-                                        batch[col].cast(str).str.extract(r'([+-]?\d*\.?\d*)', 1).cast(pd.Float64, strict=False).alias(col)
-                                    )
-                            except Exception:
-                                # Last resort: set default values
-                                if not allow_null:
-                                    batch = batch.with_columns(pd.lit(0.0).alias(col))
-
-                        # TEMPORARILY DISABLED FOR TESTING - Only filter out rows with truly invalid values (required fields that are null when not allowed)
-                        # if not allow_null and required:
-                        #     valid_rows_mask = valid_rows_mask & batch[col].is_not_null()
-
-                        # TEMPORARILY DISABLED FOR TESTING - Validate min_value if specified - be more permissive
-                        # if 'min_value' in schema_def:
-                        #     min_val = schema_def['min_value']
-                        #     # Only filter out clearly invalid values (null or negative where positive required)
-                        #     valid_rows_mask = valid_rows_mask & (batch[col].is_null() | (batch[col] >= min_val))
-
-                elif col_type == str:
-                    if col in batch.columns:
-                        # Cast to string and handle nulls - be more permissive
-                        try:
-                            batch = batch.with_columns(batch[col].cast(str).alias(col))
-                        except Exception:
-                            # Fallback for problematic string casting
-                            batch = batch.with_columns(batch[col].fill_null('').cast(str).alias(col))
-
-                        # TEMPORARILY DISABLED FOR TESTING - Only filter out rows where required string fields are truly empty/null
-                        # if not allow_null and required:
-                        #     # Be more permissive - only filter out if completely empty or "null" string
-                        #     valid_rows_mask = valid_rows_mask & batch[col].is_not_null() & (batch[col] != "") & (batch[col] != "null")
-
-            except Exception as e:
-                # Log type casting errors but continue processing
-                import logging
-
-                logger = logging.getLogger(__name__)
-                logger.warning(f'Type casting error for column {col}: {e}')
-
-        # Since all validation checks are currently disabled, no filtering is applied
-        initial_count = len(batch)
-        final_count = len(batch)  # No rows filtered out
-
-        validation_metrics['invalid_rows_count'] = 0  # No rows filtered since validation is disabled
-        validation_metrics['valid_rows_count'] = final_count
-        validation_metrics['data_quality_ratio'] = final_count / initial_count if initial_count > 0 else 1.0
-
-        # Add comprehensive validation metrics to tracing
+        # Add validation metrics for tracing
+        final_count = len(batch) if batch is not None else 0
         add_span_attributes(
             current_span,
             **{
                 f'data_quality.{date.isoformat()}.input_rows': input_row_count,
                 f'data_quality.{date.isoformat()}.valid_rows': final_count,
-                f'data_quality.{date.isoformat()}.invalid_rows': validation_metrics['invalid_rows_count'],
-                f'data_quality.{date.isoformat()}.quality_ratio': validation_metrics['data_quality_ratio'],
-                f'schema.{date.isoformat()}.missing_columns': ','.join(validation_metrics['missing_columns']),
-                f'schema.{date.isoformat()}.missing_count': len(validation_metrics['missing_columns']),
             },
         )
-
-        # Log data quality issues
-        if validation_metrics['invalid_rows_count'] > 0:
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                f'Data quality filtering for {date}: {validation_metrics["invalid_rows_count"]} invalid rows removed '
-                f'out of {input_row_count} total rows. Quality ratio: {validation_metrics["data_quality_ratio"]:.2%}'
-            )
 
         # Do the aggregation (consistent with other dataframes)
         batch_group = self.group(batch)
@@ -245,8 +140,50 @@ class DataframeCollectionStatus(Base):
 
         group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
 
-        # Cast types to match the table
-        result = self.cast_dataframe(group, self.cast_types())
+        # Schema application will be handled by base class _group_with_schema
+        return group
+
+    # Merge pre-aggregated
+    @traced_method('collection_status.regroup')
+    def regroup(self, dataframe):
+        """Regroup pre-aggregated collection status dataframe with performance tracking."""
+        current_span = trace.get_current_span()
+
+        start_time = time.time()
+        input_count = len(dataframe) if dataframe is not None else 0
+
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.regroup.input_record_count': input_count,
+                'dataframe.regroup.index_columns': len(self.unique_index_columns()),
+                'dataframe.regroup.operation': 'collection_status_regroup_after_dedup',
+            },
+        )
+
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
+            [
+                pd.col('elapsed').sum().alias('elapsed'),  # Sum elapsed time across dates
+            ]
+        )
+
+        duration = time.time() - start_time
+        output_count = len(result) if result is not None else 0
+
+        # Schema application will be handled by base class regroup_with_schema
+
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.regroup.duration_seconds': duration,
+                'dataframe.regroup.output_record_count': output_count,
+                'dataframe.regroup.compression_ratio': (input_count - output_count) / input_count if input_count > 0 else 0,
+            },
+        )
+
+        if duration > 0.5:
+            add_span_attributes(current_span, **{'dataframe.regroup.slow_operation': True})
+
         return result
 
     @staticmethod
@@ -274,20 +211,27 @@ class DataframeCollectionStatus(Base):
         }
 
     @staticmethod
-    def cast_types():
+    def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
+        """Define validation rules for collector dataframe columns.
+        
+        This schema specifies which columns are required, which can be null,
+        and validation rules for collection status data processing.
+        
+        Returns:
+            Dictionary mapping column names to validation rule dictionaries
+        """
         return {
-            'elapsed': float,
-        }
-
-    @staticmethod
-    def index_cast_types():
-        """Return casting types for index columns (unique_index_columns)."""
-        return {
-            'collection_start_timestamp': 'datetime64[ns]',
-            'since': 'datetime64[ns]',
-            'until': 'datetime64[ns]',
-            'file_name': str,
-            'status': str,
+            # Required identification columns that cannot be null
+            'file_name': {'required': True, 'allow_null': False},
+            'status': {'required': True, 'allow_null': False},
+            
+            # Optional columns that can be null
+            'collection_start_timestamp': {'required': False, 'allow_null': True},
+            'since': {'required': False, 'allow_null': True},
+            'until': {'required': False, 'allow_null': True},
+            
+            # Numeric columns with validation
+            'elapsed': {'required': False, 'allow_null': True, 'min_value': 0.0},
         }
 
     @staticmethod
@@ -314,7 +258,7 @@ class DataframeCollectionStatus(Base):
         ])
 
     @staticmethod
-    def rollup_schema() -> pa.Schema:
+    def parquet_schema() -> pa.Schema:
         """Define PyArrow schema for aggregated rollup data validation.
         
         This schema is used for validating aggregated collection status data during
@@ -384,17 +328,43 @@ class DataframeCollectionStatus(Base):
         }
 
     @staticmethod
-    def raw_data_cast_types():
-        """Return casting types for raw data columns (before grouping)."""
+    def collector_dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for processed CSV data (before grouping).
+        
+        Returns:
+            Dictionary mapping column names to Polars dtypes as strings
+        """
         return {
-            'elapsed': float,
-            # Index columns - ensure datetime columns are consistently cast
-            'collection_start_timestamp': 'datetime64[ns]',
-            'since': 'datetime64[ns]',
-            'until': 'datetime64[ns]',
-            'file_name': str,
-            'status': str,
+            # Index/metadata columns
+            'collection_start_timestamp': 'String',  # Keep as string for consistency
+            'since': 'String',
+            'until': 'String', 
+            'file_name': 'String',
+            'status': 'String',
+            
+            # Data columns
+            'elapsed': 'Float64',
         }
+
+    @staticmethod
+    def dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for working dataframes (after grouping).
+        
+        Returns:
+            Dictionary mapping column names to Polars dtypes as strings
+        """
+        return {
+            # Index/metadata columns
+            'collection_start_timestamp': 'String',  # Keep as string for consistency
+            'since': 'String',
+            'until': 'String',
+            'file_name': 'String', 
+            'status': 'String',
+            
+            # Aggregated data columns
+            'elapsed': 'Float64',
+        }
+
 
     @traced_method('collection_status.build_group')
     def build_group(self, batch_data):
@@ -409,6 +379,7 @@ class DataframeCollectionStatus(Base):
         if batch is None or len(batch) == 0:
             return self.empty()
 
-        # Process the batch and return it (no aggregation)
-        result = self._process_batch_data(batch, batch_data)
-        return result.reset_index(drop=True) if result is not None else self.empty()
+        # Process the single batch using existing logic
+        date = batch_data.get('_date_context')  # Get date from context
+        processed_data = self._process_batch_data(batch, batch_data, date)
+        return processed_data if processed_data is not None else self.empty()

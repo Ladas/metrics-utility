@@ -211,6 +211,154 @@ def merge_setdicts(dicts: List[Dict[str, Any]]) -> Dict[str, set]:
     return reduce(combine_json_values, dicts, {})
 
 
+def json_to_list_format(json_str: Union[str, None]) -> Dict[str, List[str]]:
+    """Convert JSON string to list format for fact aggregation.
+    
+    Converts JSON objects to list format following demo_prompt_facts.md:
+    {"fact1": "value1"} -> {"fact1": ["value1"]}
+    
+    Args:
+        json_str: JSON string from CSV data
+        
+    Returns:
+        Dictionary with values converted to lists
+        
+    Example:
+        >>> json_to_list_format('{"os": "linux", "arch": "x86_64"}')
+        {"os": ["linux"], "arch": ["x86_64"]}
+    """
+    if json_str is None or json_str == '':
+        return {}
+    try:
+        import json
+        parsed = json.loads(json_str)
+        if not isinstance(parsed, dict):
+            return {}
+        
+        result = {}
+        for key, value in parsed.items():
+            if isinstance(value, list):
+                result[key] = value  # Already a list
+            else:
+                result[key] = [value]  # Convert to list
+        return result
+    except:
+        return {}
+
+
+def merge_list_format_dicts(dict_list: List[Dict[str, List[str]]]) -> Dict[str, List[str]]:
+    """Merge multiple list-format dictionaries preserving unique values.
+    
+    Follows demo_prompt_facts.md approach for merging facts during aggregation:
+    {"os": ["linux"]} + {"os": ["ubuntu"]} = {"os": ["linux", "ubuntu"]}
+    
+    Args:
+        dict_list: List of dictionaries in list format
+        
+    Returns:
+        Merged dictionary with unique values preserved
+        
+    Example:
+        >>> merge_list_format_dicts([
+        ...     {"os": ["linux"], "arch": ["x86_64"]},
+        ...     {"os": ["ubuntu"], "env": ["prod"]}
+        ... ])
+        {"os": ["linux", "ubuntu"], "arch": ["x86_64"], "env": ["prod"]}
+    """
+    if not dict_list:
+        return {}
+    
+    merged = {}
+    for d in dict_list:
+        if not isinstance(d, dict):
+            continue
+        for key, values in d.items():
+            if key not in merged:
+                merged[key] = []
+            
+            # Ensure values is a list and extend
+            if isinstance(values, list):
+                merged[key].extend(values)
+            else:
+                merged[key].append(values)
+    
+    # Remove duplicates while preserving order
+    for key in merged:
+        filtered = [x for x in merged[key] if x is not None]
+        merged[key] = list(dict.fromkeys(filtered))
+    
+    return merged
+
+
+def merge_and_stringify_facts(json_strings: List[str]) -> str:
+    """Merge multiple JSON strings containing facts in list format.
+    
+    This is the core aggregation function for facts and canonical_facts columns.
+    Converts individual fact JSON strings to list format and merges them.
+    
+    Args:
+        json_strings: List of JSON strings from different records
+        
+    Returns:
+        JSON string with merged facts in list format
+        
+    Example:
+        >>> merge_and_stringify_facts([
+        ...     '{"os": "linux", "arch": "x86_64"}',
+        ...     '{"os": "ubuntu", "env": "prod"}'
+        ... ])
+        '{"os": ["linux", "ubuntu"], "arch": ["x86_64"], "env": ["prod"]}'
+    """
+    import json
+    
+    # Convert all JSON strings to list format
+    parsed_dicts = []
+    for json_str in json_strings:
+        list_format_dict = json_to_list_format(json_str)
+        if list_format_dict:
+            parsed_dicts.append(list_format_dict)
+    
+    # Merge all list format dictionaries
+    merged = merge_list_format_dicts(parsed_dicts)
+    return json.dumps(merged)
+
+
+def merge_list_arrays(json_arrays: List[str]) -> str:
+    """Merge multiple JSON array strings preserving unique values.
+    
+    For collections like host_names_before_dedup, events, etc.
+    ["host1", "host2"] + ["host1", "host4"] = ["host1", "host2", "host4"]
+    
+    Args:
+        json_arrays: List of JSON array strings
+        
+    Returns:
+        JSON string with merged unique values
+        
+    Example:
+        >>> merge_list_arrays(['["host1", "host2"]', '["host1", "host4"]'])
+        '["host1", "host2", "host4"]'
+    """
+    import json
+    
+    all_values = []
+    for json_str in json_arrays:
+        if json_str is None or json_str == '':
+            continue
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, list):
+                all_values.extend(parsed)
+            elif parsed is not None:
+                all_values.append(parsed)
+        except:
+            continue
+    
+    # Remove duplicates while preserving order
+    unique_values = list(dict.fromkeys([str(v) for v in all_values if v is not None]))
+    return json.dumps(unique_values)
+
+
 def combine_json_values(val1: Union[Dict[str, Any], None], val2: Union[Dict[str, Any], None]) -> Dict[str, set]:
     """Combine two JSON dictionaries by building sets of values for each key.
 
@@ -440,25 +588,133 @@ class Base:
         self._validation_metrics = {}  # Store validation metrics during processing
 
     def build_dataframe(self, batch_data_iterator: Any) -> pd.DataFrame:
-        """Build dataframe from batch data iterator.
+        """Build dataframe from batch data iterator using standardized schema flow.
 
-        This is the main processing method that subclasses must implement to define
-        their specific data processing logic.
+        This method implements the standard data processing pipeline:
+        1. Process each batch with collector_dataframe_schema (before grouping)
+        2. Group/aggregate data using initial_aggregations()
+        3. Apply dataframe_schema (after grouping)  
+        4. Merge batches maintaining schema consistency
+        5. Return final result with proper schema
 
         Args:
             batch_data_iterator: Iterator yielding batch data for processing
 
         Returns:
-            Processed and aggregated Polars DataFrame
-
-        Raises:
-            NotImplementedError: Always raised as subclasses must override this method
+            Processed and aggregated Polars DataFrame with consistent schema
 
         Note:
-            Implementations should use validate_collector_data() for input validation
-            and validate_rollup_data() for output validation.
+            Subclasses should override _process_batch_data() for specific processing logic
+            while this method handles the standard schema application flow.
         """
-        raise NotImplementedError('Subclasses must implement build_dataframe(batch_data_iterator)')
+        current_span = trace.get_current_span()
+        build_start_time = time.time()
+        total_records = 0
+        groups_processed = 0
+
+        add_span_attributes(current_span, **{
+            'dataframe.build.dataframe_type': self.__class__.__name__, 
+            'dataframe.build.mode': 'standardized_schema_flow'
+        })
+
+        # Initialize accumulated dataframe
+        accumulated_dataframe = None
+
+        # Process each batch from the iterator using standardized flow
+        for batch_data in batch_data_iterator:
+            # Step 1: Process batch data with collector_dataframe_schema (BEFORE grouping)
+            batch_dataframe = self._process_batch_data_with_schema(batch_data, current_span)
+            if batch_dataframe is None or len(batch_dataframe) == 0:
+                continue
+
+            # Step 2: Group this batch and apply dataframe_schema (AFTER grouping)  
+            group_dataframe = self._group_with_schema(batch_dataframe)
+            if group_dataframe is None or len(group_dataframe) == 0:
+                continue
+
+            # Step 3: Merge with accumulated results using schema-consistent operations
+            if accumulated_dataframe is None:
+                accumulated_dataframe = group_dataframe
+            else:
+                accumulated_dataframe = self.merge(accumulated_dataframe, group_dataframe)
+
+            total_records += len(group_dataframe)
+            groups_processed += 1
+
+        build_duration = time.time() - build_start_time
+        final_count = len(accumulated_dataframe) if accumulated_dataframe is not None else 0
+
+        add_span_attributes(current_span, **{
+            'dataframe.build.duration_seconds': build_duration,
+            'dataframe.build.groups_processed': groups_processed,
+            'dataframe.build.total_input_records': total_records,
+            'dataframe.build.final_record_count': final_count,
+        })
+
+        # Step 4: Apply final schema validation and return result
+        final_result = accumulated_dataframe if accumulated_dataframe is not None else self.empty()
+        if final_result is not None and len(final_result) > 0:
+            final_result = self.apply_complete_schema(final_result, schema_type="dataframe", operation_context="final_build_result")
+
+        return final_result
+
+    def _process_batch_data_with_schema(self, batch_data, current_span):
+        """Process batch data and apply collector_dataframe_schema (BEFORE grouping).
+        
+        Subclasses should override this method for specific batch processing logic.
+        This method should call apply_complete_schema with collector_dataframe type.
+        """
+        # Default implementation - subclasses should override
+        processed_data = self._process_batch_data(batch_data, current_span)
+        if processed_data is None or len(processed_data) == 0:
+            return self.empty()
+            
+        # Apply collector schema (BEFORE grouping)
+        return self.apply_complete_schema(processed_data, schema_type="collector_dataframe", operation_context="after_csv_processing")
+
+    def _process_batch_data(self, batch_data, current_span):
+        """Process individual batch data - to be overridden by subclasses."""
+        raise NotImplementedError('Subclasses must implement _process_batch_data(batch_data, current_span)')
+
+    def _group_with_schema(self, dataframe):
+        """Group dataframe and apply dataframe_schema (AFTER grouping)."""
+        # Step 1: Perform grouping using subclass implementation
+        grouped_data = self.group(dataframe)
+        if grouped_data is None or len(grouped_data) == 0:
+            return self.empty()
+            
+        # Step 2: Apply dataframe schema (AFTER grouping)
+        return self.apply_complete_schema(grouped_data, schema_type="dataframe", operation_context="after_grouping")
+
+    @traced_method('dataframe.regroup_with_schema')
+    def regroup_with_schema(self, dataframe):
+        """Regroup pre-aggregated dataframe with schema consistency (used in merge operations)."""
+        current_span = trace.get_current_span()
+        start_time = time.time()
+        input_count = len(dataframe) if dataframe is not None else 0
+
+        add_span_attributes(current_span, **{
+            'dataframe.regroup.input_record_count': input_count,
+            'dataframe.regroup.operation': 'standardized_regroup_with_schema',
+        })
+
+        # Step 1: Perform regrouping using subclass implementation
+        regrouped_data = self.regroup(dataframe)
+        if regrouped_data is None or len(regrouped_data) == 0:
+            return self.empty()
+            
+        # Step 2: Apply dataframe schema (AFTER regrouping) 
+        result = self.apply_complete_schema(regrouped_data, schema_type="dataframe", operation_context="after_regrouping")
+
+        duration = time.time() - start_time
+        output_count = len(result) if result is not None else 0
+
+        add_span_attributes(current_span, **{
+            'dataframe.regroup.duration_seconds': duration,
+            'dataframe.regroup.output_record_count': output_count,
+        })
+
+        return result
 
     def set_cached_dataframe(self, dataframe: pd.DataFrame) -> None:
         """Set a pre-computed dataframe to use instead of building from scratch.
@@ -579,6 +835,11 @@ class Base:
 
     @staticmethod
     def rollup_schema() -> Optional[pa.Schema]:
+        """Legacy method name - use parquet_schema() instead."""
+        return None
+
+    @staticmethod
+    def parquet_schema() -> Optional[pa.Schema]:
         """Define PyArrow schema for aggregated rollup data validation.
 
         Subclasses should override this method to define the expected schema
@@ -648,10 +909,119 @@ class Base:
         Note:
             If no rollup_schema() is defined, returns the DataFrame unchanged.
         """
-        schema = self.rollup_schema()
+        schema = self.parquet_schema() or self.rollup_schema()  # Support both new and legacy names
         if schema is None:
             return df
         return validate_with_schema(df, schema, strict_columns, default_values)
+
+    def validate_collector_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate collector dataframe against validation rules and filter invalid data.
+        
+        This method applies additional validation rules beyond basic schema casting,
+        including required column checks, null value validation, and value range validation.
+        Invalid rows are filtered out to ensure data quality.
+        
+        Args:
+            df: Polars DataFrame after collector_dataframe_schema has been applied
+            
+        Returns:
+            Filtered DataFrame with only valid records
+            
+        Example:
+            >>> processed_df = self.apply_complete_schema(raw_df, "collector_dataframe")
+            >>> validated_df = self.validate_collector_dataframe(processed_df)
+        """
+        validation_rules = self.collector_dataframe_validation_schema()
+        if not validation_rules:
+            return df  # No validation rules defined
+            
+        if df is None or len(df) == 0:
+            return df
+            
+        # Start with all rows as valid
+        valid_rows_mask = pd.lit(True)
+        validation_metrics = {
+            'input_rows': len(df),
+            'filtered_by_required': 0,
+            'filtered_by_null': 0, 
+            'filtered_by_range': 0,
+            'filtered_by_values': 0,
+        }
+        
+        # Apply validation rules column by column
+        for col_name, rules in validation_rules.items():
+            if col_name not in df.columns:
+                if rules.get('required', False):
+                    # Required column is missing - all rows invalid
+                    valid_rows_mask = pd.lit(False)
+                    validation_metrics['filtered_by_required'] = len(df)
+                    break
+                continue
+                
+            # Check null value constraints
+            if not rules.get('allow_null', True):
+                null_mask = df[col_name].is_not_null()
+                invalid_count = len(df.filter(~null_mask & valid_rows_mask))
+                validation_metrics['filtered_by_null'] += invalid_count
+                valid_rows_mask = valid_rows_mask & null_mask
+                
+            # Check min/max value constraints
+            if 'min_value' in rules:
+                min_val = rules['min_value']
+                range_mask = df[col_name].is_null() | (df[col_name] >= min_val)
+                invalid_count = len(df.filter(~range_mask & valid_rows_mask))
+                validation_metrics['filtered_by_range'] += invalid_count
+                valid_rows_mask = valid_rows_mask & range_mask
+                
+            if 'max_value' in rules:
+                max_val = rules['max_value']
+                range_mask = df[col_name].is_null() | (df[col_name] <= max_val)
+                invalid_count = len(df.filter(~range_mask & valid_rows_mask))
+                validation_metrics['filtered_by_range'] += invalid_count
+                valid_rows_mask = valid_rows_mask & range_mask
+                
+            # Check valid values constraints
+            if 'valid_values' in rules:
+                valid_vals = rules['valid_values']
+                values_mask = df[col_name].is_null() | df[col_name].is_in(valid_vals)
+                invalid_count = len(df.filter(~values_mask & valid_rows_mask))
+                validation_metrics['filtered_by_values'] += invalid_count
+                valid_rows_mask = valid_rows_mask & values_mask
+        
+        # Apply filtering
+        try:
+            filtered_df = df.filter(valid_rows_mask)
+        except Exception:
+            # If filtering fails, return original dataframe to avoid data loss
+            filtered_df = df
+            
+        validation_metrics['output_rows'] = len(filtered_df)
+        validation_metrics['total_filtered'] = validation_metrics['input_rows'] - validation_metrics['output_rows']
+        validation_metrics['quality_ratio'] = validation_metrics['output_rows'] / validation_metrics['input_rows'] if validation_metrics['input_rows'] > 0 else 1.0
+        
+        # Store validation metrics for observability
+        self._add_validation_metrics({
+            'collector_dataframe_validation.input_rows': validation_metrics['input_rows'],
+            'collector_dataframe_validation.output_rows': validation_metrics['output_rows'],
+            'collector_dataframe_validation.total_filtered': validation_metrics['total_filtered'],
+            'collector_dataframe_validation.quality_ratio': validation_metrics['quality_ratio'],
+            'collector_dataframe_validation.filtered_by_required': validation_metrics['filtered_by_required'],
+            'collector_dataframe_validation.filtered_by_null': validation_metrics['filtered_by_null'],
+            'collector_dataframe_validation.filtered_by_range': validation_metrics['filtered_by_range'], 
+            'collector_dataframe_validation.filtered_by_values': validation_metrics['filtered_by_values'],
+        })
+        
+        # Log significant data quality issues
+        if validation_metrics['quality_ratio'] < 0.9:  # More than 10% filtered
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Significant data quality filtering in {self.__class__.__name__}: "
+                f"{validation_metrics['total_filtered']} rows filtered out of {validation_metrics['input_rows']} "
+                f"(quality ratio: {validation_metrics['quality_ratio']:.2%})"
+            )
+            
+        return filtered_df
 
     @traced_method('dataframe.cast')
     def cast_dataframe(self, df, types):
@@ -779,16 +1149,22 @@ class Base:
         # NEW APPROACH: Use concat + regroup instead of complex join operations
         concat_start = time.time()
 
-        # CRITICAL: Ensure both DataFrames have complete schema before concat operations
-        # This prevents "column not found" errors during concat
+        # CRITICAL: Apply complete dataframe_schema to both DataFrames before merging
+        # This ensures consistent Polars types (especially Datetime) following rollups_data_flow.md
         try:
-            rollup = self._ensure_complete_schema(rollup)
-            new_group = self._ensure_complete_schema(new_group)
+            print('DEBUG MERGE: Applying complete dataframe_schema to rollup before merge')
+            rollup = self.apply_complete_schema(rollup, schema_type="dataframe", operation_context="before_merge_rollup")
+            print('DEBUG MERGE: Applying complete dataframe_schema to new_group before merge')
+            new_group = self.apply_complete_schema(new_group, schema_type="dataframe", operation_context="before_merge_new_group")
         except Exception as schema_error:
             import logging
 
             logger = logging.getLogger(__name__)
-            logger.warning(f'Schema completion failed during merge: {schema_error}. Proceeding with existing schemas.')
+            logger.warning(f'Complete schema application failed during merge: {schema_error}. Proceeding with basic alignment.')
+            
+            # Fallback to basic schema completion
+            rollup = self._ensure_complete_schema(rollup)
+            new_group = self._ensure_complete_schema(new_group)
 
         # CRITICAL: Ensure schema compatibility before concat to prevent type mismatch errors
         rollup_aligned, new_group_aligned = self._align_schemas_for_concat(rollup, new_group)
@@ -813,17 +1189,17 @@ class Base:
             },
         )
 
-        # Now use regroup to handle aggregation (if available)
+        # Now use standardized regroup with schema handling
         regroup_start = time.time()
         if hasattr(self, 'regroup') and callable(self.regroup):
-            print('DEBUG MERGE: Using regroup method for aggregation')
-            result = self.regroup(concatenated)
+            print('DEBUG MERGE: Using standardized regroup_with_schema method')
+            result = self.regroup_with_schema(concatenated)
         else:
             print('DEBUG MERGE: No regroup method found, returning concatenated data')
             result = concatenated
 
         regroup_duration = time.time() - regroup_start
-        print(f'DEBUG MERGE: After regroup: {len(result) if result is not None else 0} records')
+        print(f'DEBUG MERGE: After regroup_with_schema: {len(result) if result is not None else 0} records')
 
         add_span_attributes(
             current_span,
@@ -833,8 +1209,8 @@ class Base:
             },
         )
 
-        # Cast types for grouped/aggregated data (rollups)
-        result = self._apply_consistent_casting(result)
+        # Schema is already applied by regroup_with_schema, no need for additional application
+        # This eliminates duplicate schema application that could cause timing issues
 
         total_duration = time.time() - start_time
         final_count = len(result) if result is not None else 0
@@ -1107,31 +1483,341 @@ class Base:
         return df
 
     def _ensure_compatible_types(self, rollup, new_group, all_columns):
-        """Ensure matching columns have compatible types between DataFrames."""
-        print(f'DEBUG MERGE: Ensuring compatible types for {len(all_columns)} columns')
+        """Ensure matching columns have compatible types between DataFrames using schema definitions."""
+        print(f'DEBUG MERGE: Ensuring compatible types for {len(all_columns)} columns using dataframe_schema')
+        
+        # Get the target schema for this dataframe type
+        target_schema = self.dataframe_schema()
 
         for col in all_columns:
             rollup_dtype = rollup[col].dtype
             new_group_dtype = new_group[col].dtype
 
-            # If types don't match, convert both to a compatible type
+            # If types don't match, convert both to the schema-defined type
             if rollup_dtype != new_group_dtype:
                 print(f'DEBUG MERGE: Type mismatch for {col}: {rollup_dtype} vs {new_group_dtype}')
-
-                # Strategy: Convert both to String (Utf8) for maximum compatibility
-                try:
-                    rollup = rollup.with_columns(rollup[col].cast(pd.Utf8, strict=False).alias(col))
-                    new_group = new_group.with_columns(new_group[col].cast(pd.Utf8, strict=False).alias(col))
-                    print(f'DEBUG MERGE: Converted {col} to Utf8 for compatibility')
-                except Exception as e:
-                    print(f'DEBUG MERGE: Failed to convert {col} to Utf8: {e}')
-                    # If conversion fails, leave as-is and let Polars handle it
+                
+                # Get target type from schema
+                if col in target_schema:
+                    target_type_str = target_schema[col]
+                    
+                    # Convert string type names to Polars types
+                    if target_type_str == 'String':
+                        target_type = pd.Utf8
+                    elif target_type_str == 'Int64':
+                        target_type = pd.Int64
+                    elif target_type_str == 'Float64':
+                        target_type = pd.Float64
+                    elif target_type_str == 'Boolean':
+                        target_type = pd.Boolean
+                    elif target_type_str == 'Datetime':
+                        # Special handling for datetime conversion from strings
+                        try:
+                            # First try string to datetime conversion (common case from CSV data)
+                            rollup = rollup.with_columns(rollup[col].str.to_datetime(strict=False).alias(col))
+                            new_group = new_group.with_columns(new_group[col].str.to_datetime(strict=False).alias(col))
+                            print(f'DEBUG MERGE: Converted {col} to {target_type_str} using str.to_datetime')
+                        except Exception as e:
+                            print(f'DEBUG MERGE: Failed str.to_datetime for {col}: {e}, trying direct cast')
+                            # Fallback to direct cast
+                            target_type = pd.Datetime('us')  # Use microsecond precision
+                            try:
+                                rollup = rollup.with_columns(rollup[col].cast(target_type, strict=False).alias(col))
+                                new_group = new_group.with_columns(new_group[col].cast(target_type, strict=False).alias(col))
+                                print(f'DEBUG MERGE: Converted {col} to {target_type_str} using direct cast')
+                            except Exception as e2:
+                                print(f'DEBUG MERGE: Failed direct cast for {col}: {e2}')
+                        continue  # Skip the regular casting since we handled datetime specially
+                    else:
+                        target_type = pd.Utf8  # Default fallback
+                        
+                    try:
+                        rollup = rollup.with_columns(rollup[col].cast(target_type, strict=False).alias(col))
+                        new_group = new_group.with_columns(new_group[col].cast(target_type, strict=False).alias(col))
+                        print(f'DEBUG MERGE: Converted {col} to {target_type_str} based on schema')
+                    except Exception as e:
+                        print(f'DEBUG MERGE: Failed to convert {col} to {target_type_str}: {e}')
+                        # Fallback to string
+                        try:
+                            rollup = rollup.with_columns(rollup[col].cast(pd.Utf8, strict=False).alias(col))
+                            new_group = new_group.with_columns(new_group[col].cast(pd.Utf8, strict=False).alias(col))
+                            print(f'DEBUG MERGE: Fallback: Converted {col} to Utf8 for compatibility')
+                        except Exception as fallback_e:
+                            print(f'DEBUG MERGE: Failed fallback for {col}: {fallback_e}')
+                else:
+                    # Column not in schema, use original string fallback
+                    try:
+                        rollup = rollup.with_columns(rollup[col].cast(pd.Utf8, strict=False).alias(col))
+                        new_group = new_group.with_columns(new_group[col].cast(pd.Utf8, strict=False).alias(col))
+                        print(f'DEBUG MERGE: No schema for {col}, converted to Utf8 for compatibility')
+                    except Exception as e:
+                        print(f'DEBUG MERGE: Failed to convert {col} to Utf8: {e}')
 
         return rollup, new_group
+
+    def apply_complete_schema(self, df, schema_type: str = "dataframe", operation_context: str = "unknown"):
+        """Apply complete schema transformation including type casting, column completion, and ordering.
+        
+        This is the central method for all schema operations to ensure consistency across the entire pipeline.
+        
+        Args:
+            df: Polars DataFrame to transform
+            schema_type: Type of schema to apply ("collector_dataframe", "dataframe", or "parquet")
+            operation_context: Context description for debugging (e.g., "after_grouping", "after_parquet_load")
+            
+        Returns:
+            DataFrame with complete schema applied: proper types, all columns present, consistent ordering
+        """
+        if df is None or len(df) == 0:
+            return df
+            
+        print(f'DEBUG SCHEMA: Applying complete {schema_type} schema in context: {operation_context}')
+        
+        # Step 1: Get the appropriate schema and default values
+        if schema_type == "collector_dataframe":
+            schema_dict = self.collector_dataframe_schema() if hasattr(self, 'collector_dataframe_schema') else {}
+            default_values = getattr(self, 'get_collector_default_values', lambda: {})()
+        elif schema_type == "dataframe":
+            schema_dict = self.dataframe_schema() if hasattr(self, 'dataframe_schema') else {}
+            default_values = getattr(self, 'get_rollup_default_values', lambda: {})()
+        elif schema_type == "parquet":
+            # For parquet schema, we'll use PyArrow schema if available
+            schema_dict = {}  # Handled separately in save operations
+            default_values = getattr(self, 'get_rollup_default_values', lambda: {})()
+        else:
+            print(f'DEBUG SCHEMA: Unknown schema type {schema_type}, skipping')
+            return df
+            
+        if not schema_dict:
+            print(f'DEBUG SCHEMA: No {schema_type} schema defined, skipping')
+            return df
+            
+        # Step 2: Ensure all schema columns are present with proper defaults
+        df = self._ensure_schema_columns(df, schema_dict, default_values)
+        
+        # Step 3: Apply schema-based type casting
+        df = self._apply_schema_casting(df, schema_dict, f"{schema_type}_schema_{operation_context}")
+        
+        # Step 4: Apply validation for collector_dataframe schemas
+        if schema_type == "collector_dataframe":
+            df = self.validate_collector_dataframe(df)
+        
+        # Step 5: Ensure consistent column ordering
+        df = self._ensure_consistent_column_ordering(df)
+        
+        print(f'DEBUG SCHEMA: Complete {schema_type} schema applied successfully in {operation_context}')
+        return df
+
+    def _apply_schema_casting(self, df, schema_dict: Dict[str, str], schema_name: str = "unknown"):
+        """Apply schema-based type casting to a DataFrame.
+        
+        Args:
+            df: Polars DataFrame to cast
+            schema_dict: Dictionary mapping column names to Polars dtypes
+            schema_name: Name of schema for debugging
+            
+        Returns:
+            DataFrame with proper types applied
+        """
+        if df is None or len(df) == 0:
+            return df
+            
+        print(f'DEBUG SCHEMA: Applying {schema_name} schema to DataFrame with {len(df)} records')
+        
+        # Apply casting column by column
+        for col_name, target_type in schema_dict.items():
+            if col_name in df.columns:
+                try:
+                    # Convert string type names to Polars types
+                    if target_type == 'String':
+                        polars_type = pd.Utf8
+                    elif target_type == 'Int64':
+                        polars_type = pd.Int64
+                    elif target_type == 'Float64':
+                        polars_type = pd.Float64
+                    elif target_type == 'Boolean':
+                        polars_type = pd.Boolean
+                    elif target_type == 'Datetime':
+                        # Special handling for datetime conversion from strings
+                        try:
+                            # Strategy 1: Try basic auto-parsing first
+                            df = df.with_columns(df[col_name].str.to_datetime(strict=False, format=None).alias(col_name))
+                            print(f'DEBUG SCHEMA: Successfully converted {col_name} to datetime using auto-parsing')
+                            continue  # Skip the regular cast since we handled datetime specially
+                        except Exception as e1:
+                            print(f'DEBUG SCHEMA: Auto datetime parsing failed for {col_name}: {e1}')
+                            try:
+                                # Strategy 2: Strip timezone info and parse with explicit format
+                                # Handle format like "2025-03-01 10:13:16.97527+00" by removing "+00"
+                                df_cleaned = df.with_columns(
+                                    df[col_name].str.replace_all(r'\+\d{2}:\d{2}$', '').str.replace_all(r'\+\d{2}$', '').str.replace_all(r'Z$', '').alias(col_name + '_clean')
+                                )
+                                # Use explicit format that we know works from testing
+                                df = df_cleaned.with_columns(
+                                    df_cleaned[col_name + '_clean'].str.to_datetime(format="%Y-%m-%d %H:%M:%S%.f", strict=False).alias(col_name)
+                                ).drop(col_name + '_clean')
+                                print(f'DEBUG SCHEMA: Successfully converted {col_name} to datetime after stripping timezone with explicit format')
+                                continue
+                            except Exception as e2:
+                                print(f'DEBUG SCHEMA: Timezone stripping with format failed for {col_name}: {e2}')
+                                try:
+                                    # Strategy 3: Try basic ISO format pattern without timezone stripping
+                                    df = df.with_columns(df[col_name].str.to_datetime(format="%Y-%m-%d %H:%M:%S%.f", strict=False).alias(col_name))
+                                    print(f'DEBUG SCHEMA: Successfully converted {col_name} to datetime using ISO format directly')
+                                    continue
+                                except Exception as e3:
+                                    print(f'DEBUG SCHEMA: Direct ISO format parsing failed for {col_name}: {e3}, trying manual conversion')
+                                    try:
+                                        # Strategy 4: Manual datetime conversion to handle complex formats
+                                        def parse_datetime_manual(timestamp_str):
+                                            if timestamp_str is None or timestamp_str == '':
+                                                return None
+                                            try:
+                                                import datetime as dt
+                                                # Remove timezone suffix manually
+                                                clean_str = str(timestamp_str)
+                                                # Handle +00, +0000, Z timezones
+                                                if clean_str.endswith('+00'):
+                                                    clean_str = clean_str[:-3]
+                                                elif clean_str.endswith('Z'):
+                                                    clean_str = clean_str[:-1]
+                                                elif '+' in clean_str and clean_str.split('+')[-1].isdigit():
+                                                    clean_str = clean_str.split('+')[0]
+                                                
+                                                # Parse the cleaned string
+                                                return dt.datetime.fromisoformat(clean_str.replace(' ', 'T'))
+                                            except:
+                                                return None
+                                        
+                                        df = df.with_columns(
+                                            df[col_name].map_elements(parse_datetime_manual, return_dtype=pd.Datetime('us')).alias(col_name)
+                                        )
+                                        print(f'DEBUG SCHEMA: Successfully converted {col_name} to datetime using manual parsing')
+                                        continue
+                                    except Exception as e4:
+                                        print(f'DEBUG SCHEMA: Manual datetime parsing failed for {col_name}: {e4}, trying direct cast')
+                                        # Fallback to direct cast
+                                        polars_type = pd.Datetime('us')  # Use microsecond precision
+                    else:
+                        print(f'DEBUG SCHEMA: Unknown type {target_type} for column {col_name}, skipping')
+                        continue
+                        
+                    df = df.with_columns(df[col_name].cast(polars_type, strict=False).alias(col_name))
+                    
+                except Exception as e:
+                    print(f'DEBUG SCHEMA: Failed to cast {col_name} to {target_type}: {e}')
+                    
+        print(f'DEBUG SCHEMA: Successfully applied {schema_name} schema')
+        return df
+        
+    def _ensure_schema_columns(self, df, schema_dict: Dict[str, str], default_values: Dict[str, Any] = None):
+        """Ensure DataFrame has all columns defined in schema with proper defaults.
+        
+        Args:
+            df: Polars DataFrame
+            schema_dict: Dictionary mapping column names to Polars dtypes
+            default_values: Dictionary mapping column names to default values
+            
+        Returns:
+            DataFrame with all schema columns present
+        """
+        if df is None:
+            return df
+            
+        if default_values is None:
+            default_values = {}
+            
+        missing_columns = []
+        for col_name in schema_dict.keys():
+            if col_name not in df.columns:
+                missing_columns.append(col_name)
+                
+                # Get default value
+                if col_name in default_values:
+                    default_val = default_values[col_name]
+                else:
+                    # Generate type-appropriate default
+                    target_type = schema_dict[col_name]
+                    if target_type == 'String':
+                        default_val = ''
+                    elif target_type == 'Int64':
+                        default_val = 0
+                    elif target_type == 'Float64':
+                        default_val = 0.0
+                    elif target_type == 'Boolean':
+                        default_val = False
+                    elif target_type == 'Datetime':
+                        default_val = None  # Null datetime
+                    else:
+                        default_val = None
+                        
+                df = df.with_columns(pd.lit(default_val).alias(col_name))
+                
+        if missing_columns:
+            print(f'DEBUG SCHEMA: Added {len(missing_columns)} missing columns: {missing_columns}')
+            
+        return df
 
     @staticmethod
     def unique_index_columns():
         pass
+
+    @staticmethod
+    def collector_dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for processed CSV data (before grouping).
+        
+        This schema is used after CSV processing but before the group() method is called.
+        Columns should be in their final types ready for aggregation.
+        
+        Returns:
+            Dictionary mapping column names to Polars dtypes (as strings)
+        """
+        raise NotImplementedError("Subclasses must implement collector_dataframe_schema()")
+
+    @staticmethod 
+    def dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for working dataframes (after grouping).
+        
+        This schema is used for:
+        - Data after group() aggregation 
+        - Data when merging multiple rollups
+        - Data in report generation
+        
+        Returns:
+            Dictionary mapping column names to Polars dtypes (as strings)
+        """
+        raise NotImplementedError("Subclasses must implement dataframe_schema()")
+
+    @staticmethod
+    def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
+        """Define validation rules for collector dataframe columns.
+        
+        This schema specifies which columns are required, which can be null,
+        and any additional validation rules like min/max values. It works
+        alongside collector_dataframe_schema() to provide comprehensive
+        data quality control.
+        
+        Returns:
+            Dictionary mapping column names to validation rule dictionaries.
+            Each validation dict can contain:
+            - 'required': bool - Whether column must be present
+            - 'allow_null': bool - Whether null values are allowed
+            - 'min_value': Number - Minimum allowed value (for numeric columns)
+            - 'max_value': Number - Maximum allowed value (for numeric columns)
+            - 'valid_values': List - List of allowed values (for categorical columns)
+            
+        Example:
+            {
+                'host_name': {'required': True, 'allow_null': False},
+                'task_runs': {'required': True, 'allow_null': False, 'min_value': 0},
+                'duration': {'required': False, 'allow_null': True, 'min_value': 0.0},
+            }
+            
+        Note:
+            If not implemented by subclass, no additional validation is performed
+            beyond basic schema casting.
+        """
+        return {}  # Default: no additional validation rules
 
     @staticmethod
     def data_columns():
@@ -1161,13 +1847,10 @@ class Base:
             DataFrame loaded from parquet with consistent columns, types, and indexing
         """
         import polars as pd
+        import logging
+        logger = logging.getLogger(__name__)
 
         try:
-            # Read parquet files with comprehensive nested object types handling
-            import logging
-
-            logger = logging.getLogger(__name__)
-
             # Strategy 1: Try Polars direct read first
             try:
                 df = pd.read_parquet(parquet_path)
@@ -1178,29 +1861,62 @@ class Base:
                 logger.debug(f'Successfully loaded {parquet_path} with Polars direct read: {len(df)} records')
 
             except Exception as error:
-                if 'not yet implemented: Nested object types' in str(error):
-                    logger.warning(f'Polars cannot read nested object types in {parquet_path}. Trying pyarrow approach.')
+                error_msg = str(error)
+                if 'not yet implemented: Nested object types' in error_msg or 'type Object' in error_msg or 'incompatible with expected type' in error_msg:
+                    logger.warning(f'Polars cannot read object/nested types in {parquet_path}: {error}. Trying pyarrow approach.')
 
-                    # Strategy 2: Try PyArrow with type conversion
+                    # Strategy 2: Try PyArrow with comprehensive type conversion
                     try:
                         import pyarrow as pa
                         import pyarrow.parquet as pq
 
-                        # Read with pyarrow and convert to polars, handling nested types
+                        # Read with pyarrow and convert to polars, handling all complex types
                         table = pq.read_table(parquet_path)
 
-                        # Convert complex types to string for polars compatibility
+                        # Convert all problematic types to string for polars compatibility
                         schema_updates = {}
                         for i, field in enumerate(table.schema):
-                            if pa.types.is_list(field.type) or pa.types.is_struct(field.type):
+                            field_type = field.type
+                            col_name = field.name
+                            
+                            # Convert any problematic types to strings
+                            if (pa.types.is_list(field_type) or 
+                                pa.types.is_struct(field_type) or 
+                                str(field_type) == 'object' or
+                                'object' in str(field_type).lower()):
+                                
                                 # Convert complex types to string representation
                                 column_data = table.column(i).to_pylist()
-                                string_data = [str(item) if item is not None else None for item in column_data]
-                                schema_updates[field.name] = pa.array(string_data)
+                                
+                                # Handle various data types and convert to JSON strings
+                                string_data = []
+                                for item in column_data:
+                                    if item is None:
+                                        string_data.append('{}' if col_name in ['canonical_facts', 'facts'] else '[]')
+                                    elif isinstance(item, (dict, list, set)):
+                                        import json
+                                        try:
+                                            if isinstance(item, set):
+                                                item = list(item)  # Convert set to list for JSON serialization
+                                            string_data.append(json.dumps(item))
+                                        except (TypeError, ValueError):
+                                            # Fallback for non-serializable objects
+                                            string_data.append('{}' if col_name in ['canonical_facts', 'facts'] else '[]')
+                                    else:
+                                        # Convert other types to string representation
+                                        try:
+                                            if col_name in ['canonical_facts', 'facts']:
+                                                string_data.append('{}')  # Empty dict for fact columns
+                                            else:
+                                                string_data.append('[]')  # Empty list for other complex columns
+                                        except:
+                                            string_data.append('[]')
+                                
+                                schema_updates[col_name] = pa.array(string_data, type=pa.string())
 
                         # Replace complex columns with string versions
                         if schema_updates:
-                            logger.info(f'Converting {len(schema_updates)} complex columns to strings: {list(schema_updates.keys())}')
+                            logger.info(f'Converting {len(schema_updates)} complex/object columns to strings: {list(schema_updates.keys())}')
                             for col_name, new_array in schema_updates.items():
                                 col_index = table.schema.get_field_index(col_name)
                                 table = table.set_column(col_index, col_name, new_array)
@@ -1210,7 +1926,7 @@ class Base:
                         if len(df) == 0:
                             return self.empty()
 
-                        logger.info(f'Successfully loaded {parquet_path} using pyarrow with type conversion: {len(df)} records')
+                        logger.info(f'Successfully loaded {parquet_path} using pyarrow with object type conversion: {len(df)} records')
 
                     except Exception as pyarrow_error:
                         logger.error(
@@ -1224,28 +1940,16 @@ class Base:
         except FileNotFoundError:
             return self.empty()
         except Exception as e:
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.error(f'Unexpected error loading parquet file {parquet_path}: {e}')
             return self.empty()
 
-        # Ensure all required columns exist with proper defaults
-        df = self._ensure_complete_schema(df)
-
-        # CRITICAL: Apply consistent column ordering after loading from parquet
-        # This is essential because parquet files saved before the column ordering fix
-        # may have inconsistent column orders, causing vstack errors when loading multiple files
-        df = self._ensure_consistent_column_ordering(df)
-
-        # Deserialize JSON strings back to Object types for complex data structures
-        df = self._deserialize_json_columns(df)
-
-        # Apply casting for both index and data columns
-        df = self._apply_consistent_casting(df)
-
-        # Set proper index
-        df = self._apply_consistent_indexing(df)
+        # CRITICAL: Apply complete dataframe schema after loading from parquet
+        # This converts from parquet storage types back to consistent working dataframe types
+        try:
+            df = self.apply_complete_schema(df, schema_type="dataframe", operation_context="after_parquet_load")
+            logger.debug(f'Applied complete dataframe schema after loading parquet: {len(df)} records')
+        except Exception as schema_error:
+            logger.warning(f'Failed to apply complete schema after parquet load: {schema_error}. Proceeding with loaded data.')
 
         return df
 
