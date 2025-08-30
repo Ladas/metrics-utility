@@ -104,248 +104,146 @@ class ReportCCSPv2(Base):
         return job_host_summary_dataframe, events_dataframe
 
     def build_spreadsheet(self):
-        print("DEBUG: ReportCCSPv2.build_spreadsheet() starting...")
         job_host_summary_dataframe = self.dataframes['job_host_summary']
         events_dataframe = self.dataframes['main_jobevent']
         scope_dataframe = self.dataframes['main_host']
         status_dataframe = self.dataframes['data_collection_status']
-        
-        print(f"DEBUG: Got dataframes - job_host_summary: {len(job_host_summary_dataframe) if job_host_summary_dataframe is not None else 0} records")
-        print(f"DEBUG: Got dataframes - events: {len(events_dataframe) if events_dataframe is not None else 0} records")
-        print(f"DEBUG: Got dataframes - scope: {len(scope_dataframe) if scope_dataframe is not None else 0} records")
-        print(f"DEBUG: Got dataframes - status: {len(status_dataframe) if status_dataframe is not None else 0} records")
-        print("DEBUG: Dataframe extraction completed")
 
         # Fix host names in the event data, to take in account the variables
-        print("DEBUG: Fixing event host names...")
         events_dataframe = self._fix_event_host_names(job_host_summary_dataframe, events_dataframe)
-        print("DEBUG: Applying filters...")
         # TODO: also apply organization filter
         job_host_summary_dataframe, events_dataframe = self._apply_filter(job_host_summary_dataframe, events_dataframe)
-        print("DEBUG: Filters applied successfully.")
 
         # Create the workbook and worksheets
-        print("DEBUG: Setting up workbook...")
         self.wb.remove(self.wb.active)  # delete the default sheet
 
         # First sheet index
         sheet_index = 0
-        print("DEBUG: Starting sheet generation...")
 
         # Handle empty dataframes gracefully
-        print("DEBUG: Filtering direct/indirect nodes...")
         if job_host_summary_dataframe is None or len(job_host_summary_dataframe) == 0:
             directs = pd.DataFrame()
             indirects = pd.DataFrame()
-            print("DEBUG: No job_host_summary data, using empty dataframes")
         else:
-            print(f"DEBUG: job_host_summary_dataframe has {len(job_host_summary_dataframe)} records")
-            print(f"DEBUG: job_host_summary hosts: {sorted(job_host_summary_dataframe['host_name'].unique().to_list())}")
-            
-            # Check for missing hosts specifically
-            missing_hosts = ['manually_created_host_1', 'test_host_42']
-            for missing_host in missing_hosts:
-                if missing_host in job_host_summary_dataframe['host_name'].to_list():
-                    print(f"DEBUG: ✓ {missing_host} FOUND in job_host_summary_dataframe")
-                    host_records = job_host_summary_dataframe.filter(job_host_summary_dataframe['host_name'] == missing_host)
-                    print(f"DEBUG:   Records for {missing_host}: {len(host_records)}")
-                    if len(host_records) > 0:
-                        sample = host_records.head(1).to_dicts()[0]
-                        managed_node_type = sample.get('managed_node_type', 'UNKNOWN')
-                        print(f"DEBUG:   Sample managed_node_type: {managed_node_type} (DIRECT={DIRECT})")
-                else:
-                    print(f"DEBUG: ✗ {missing_host} MISSING from job_host_summary_dataframe")
-            
             # Use Polars-compatible filtering syntax
-            print("DEBUG: Creating direct filter...")
             direct_filter = job_host_summary_dataframe['managed_node_type'] == DIRECT
-            print("DEBUG: Creating indirect filter...")
             indirect_filter = job_host_summary_dataframe['managed_node_type'] == INDIRECT
-            
-            print("DEBUG: Applying direct filter...")
+
             directs = (
                 job_host_summary_dataframe.filter(direct_filter)
                 if hasattr(job_host_summary_dataframe, 'filter')
                 else job_host_summary_dataframe[direct_filter]
             )
-            print("DEBUG: Direct filter applied successfully")
-            print(f"DEBUG: Directs dataframe has {len(directs)} records")
-            print(f"DEBUG: Direct hosts: {sorted(directs['host_name'].unique().to_list())}")
-            
-            # Check for missing hosts after filtering
-            for missing_host in missing_hosts:
-                if missing_host in directs['host_name'].to_list():
-                    print(f"DEBUG: ✓ {missing_host} SURVIVED direct filtering")
-                else:
-                    print(f"DEBUG: ✗ {missing_host} LOST during direct filtering")
-            
-            print("DEBUG: Applying indirect filter...")
+
             indirects = (
                 job_host_summary_dataframe.filter(indirect_filter)
                 if hasattr(job_host_summary_dataframe, 'filter')
                 else job_host_summary_dataframe[indirect_filter]
             )
-            print("DEBUG: Indirect filter applied successfully")
-            print(f"DEBUG: Filtered to {len(directs)} direct and {len(indirects)} indirect nodes")
 
         if 'ccsp_summary' in self.optional_report_sheets():
-            print("DEBUG: Building ccsp_summary sheet...")
             ws = self.add_sheet('Usage Reporting', sheet_index, self.config['column_widths'])
-            print("DEBUG: ccsp_summary sheet added")
             current_row = self._build_heading_h1(1, ws)
-            print("DEBUG: ccsp_summary heading built")
             current_row = self._build_header(current_row, ws)
-            print("DEBUG: ccsp_summary header built")
             current_row = self._build_po_number(current_row, ws)
-            print("DEBUG: ccsp_summary PO number built")
             current_row = self._build_updated_timestamp(current_row, ws)
-            print("DEBUG: ccsp_summary timestamp built")
             self._build_data_section(current_row, ws, directs)
-            print("DEBUG: ccsp_summary data section built")
             sheet_index += 1
-            print("DEBUG: ccsp_summary sheet completed.")
 
         if 'jobs' in self.optional_report_sheets():
-            print("DEBUG: Building jobs sheet...")
             ws = self.add_sheet('Jobs', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: jobs sheet added")
             self._build_data_section_usage_by_job(1, ws, job_host_summary_dataframe)
-            print("DEBUG: jobs data section built")
             sheet_index += 1
-            print("DEBUG: jobs sheet completed.")
 
         # Determine the function to use for managed nodes
-        print("DEBUG: Determining managed nodes function...")
         if 'managed_nodes_by_organizations' in self.optional_report_sheets():
             func = self._build_data_section_usage_by_node_with_org_details
-            print("DEBUG: Using node_with_org_details function")
         else:
             func = self._build_data_section_usage_by_node
-            print("DEBUG: Using standard node function")
 
         if 'managed_nodes' in self.optional_report_sheets():
-            print("DEBUG: Building managed_nodes sheet...")
             # Sheet with list of managed nodes
             ws = self.add_sheet('Managed nodes', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: managed_nodes sheet added")
             func(1, ws, directs, managed_node_type='direct')
-            print("DEBUG: managed_nodes data section built")
             sheet_index += 1
-            print("DEBUG: managed_nodes sheet completed.")
 
         if 'indirectly_managed_nodes' in self.optional_report_sheets():
-            print("DEBUG: Building indirectly_managed_nodes sheet...")
             ws = self.add_sheet('Indirectly Managed nodes', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: indirectly_managed_nodes sheet added")
             ## This function creates the correct columns for this sheet.  Using the func variable from above
             ## can result in the wrong columns for this sheet if `managed_nodes_by_organizations`
             ## exists in the METRICS_UTILITY_OPTIONAL_CCSP_REPORT_SHEETS env var.
             self._build_data_section_usage_by_node(1, ws, indirects, managed_node_type='indirect')
-            print("DEBUG: indirectly_managed_nodes data section built")
             sheet_index += 1
-            print("DEBUG: indirectly_managed_nodes sheet completed.")
 
         if 'inventory_scope' in self.optional_report_sheets():
-            print("DEBUG: Building inventory_scope sheet...")
             ws = self.add_sheet('Inventory Scope', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: inventory_scope sheet added")
             scope = scope_dataframe
             self._build_data_section_scope(1, ws, scope)
-            print("DEBUG: inventory_scope data section built")
             sheet_index += 1
-            print("DEBUG: inventory_scope sheet completed.")
 
         if 'infrastructure_summary' in self.optional_report_sheets():
-            print("DEBUG: Building infrastructure_summary sheet...")
             ws = self.add_sheet('Infrastructure Summary', sheet_index, self.config['infrastructure_summary_column_widths'])
-            print("DEBUG: infrastructure_summary sheet added")
             self._build_data_section_infrastructure_summary(1, ws, indirects)
-            print("DEBUG: infrastructure_summary data section built")
             sheet_index += 1
-            print("DEBUG: infrastructure_summary sheet completed.")
 
         if 'usage_by_organizations' in self.optional_report_sheets():
-            print("DEBUG: Building usage_by_organizations sheet...")
             # Sheet with usage by org
             ws = self.add_sheet('Usage by organizations', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: usage_by_organizations sheet added")
             self._build_data_section_usage_by_org(1, ws, job_host_summary_dataframe)
-            print("DEBUG: usage_by_organizations data section built")
             sheet_index += 1
-            print("DEBUG: usage_by_organizations sheet completed.")
 
         # Handle usage sheets whether events_dataframe has data or not
         if 'usage_by_collections' in self.optional_report_sheets():
-            print("DEBUG: Building usage_by_collections sheet...")
             # Sheet with usage by collections
             ws = self.add_sheet('Usage by collections', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: usage_by_collections sheet added")
             if events_dataframe is not None:
                 self._build_data_section_usage_by_collections(1, ws, events_dataframe)
             else:
                 # Create empty sheet with proper headers
                 self._build_data_section_usage_by_collections(1, ws, pd.DataFrame())
-            print("DEBUG: usage_by_collections data section built")
             sheet_index += 1
-            print("DEBUG: usage_by_collections sheet completed.")
 
         if 'usage_by_roles' in self.optional_report_sheets():
-            print("DEBUG: Building usage_by_roles sheet...")
             # Sheet with usage by roles
             ws = self.add_sheet('Usage by roles', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: usage_by_roles sheet added")
             if events_dataframe is not None:
                 self._build_data_section_usage_by_roles(1, ws, events_dataframe)
             else:
                 # Create empty sheet with proper headers
                 self._build_data_section_usage_by_roles(1, ws, pd.DataFrame())
-            print("DEBUG: usage_by_roles data section built")
             sheet_index += 1
-            print("DEBUG: usage_by_roles sheet completed.")
 
         if 'usage_by_modules' in self.optional_report_sheets():
-            print("DEBUG: Building usage_by_modules sheet...")
             # Sheet with usage by modules
             ws = self.add_sheet('Usage by modules', sheet_index, self.config['data_column_widths'])
-            print("DEBUG: usage_by_modules sheet added")
             if events_dataframe is not None:
                 self._build_data_section_usage_by_modules(1, ws, events_dataframe)
             else:
                 # Create empty sheet with proper headers
                 self._build_data_section_usage_by_modules(1, ws, pd.DataFrame())
-            print("DEBUG: usage_by_modules data section built")
             sheet_index += 1
-            print("DEBUG: usage_by_modules sheet completed.")
 
         if 'managed_nodes_by_organizations' in self.optional_report_sheets():
-            print("DEBUG: Building managed_nodes_by_organizations sheets...")
             # Sheet with list of managed nodes by organization, this will generate multiple tabs
             if (
                 job_host_summary_dataframe is not None
                 and len(job_host_summary_dataframe) > 0
                 and 'organization_name' in job_host_summary_dataframe.columns
             ):
-                print("DEBUG: Getting unique organization names...")
                 organization_names = sorted(job_host_summary_dataframe['organization_name'].unique())
-                print(f"DEBUG: Found {len(organization_names)} organizations")
             else:
                 organization_names = []
-                print("DEBUG: No organizations found")
 
             if not organization_names:
-                print("DEBUG: Creating 'No Organizations' sheet...")
                 # If no organizations, create a default sheet to avoid empty workbook
                 ws = self.add_sheet('No Organizations', sheet_index, self.config['data_column_widths'])
                 # Create empty dataframe for the function
                 empty_dataframe = pd.DataFrame()
                 self._build_data_section_usage_by_node(1, ws, empty_dataframe, mode='by_organization')
                 sheet_index += 1
-                print("DEBUG: 'No Organizations' sheet completed.")
             else:
                 for i, organization_name in enumerate(organization_names, 1):
-                    print(f"DEBUG: Building organization sheet {i}/{len(organization_names)}: {organization_name}")
                     ws = self.add_sheet(organization_name, sheet_index, self.config['data_column_widths'])
-                    print(f"DEBUG: Organization sheet '{organization_name}' added")
 
                     # Filter the data for a certain organization using Polars-compatible syntax
                     org_filter_condition = job_host_summary_dataframe['organization_name'] == organization_name
@@ -354,25 +252,16 @@ class ReportCCSPv2(Base):
                         if hasattr(job_host_summary_dataframe, 'filter')
                         else job_host_summary_dataframe[org_filter_condition]
                     )
-                    print(f"DEBUG: Organization data filtered for '{organization_name}'")
                     self._build_data_section_usage_by_node(1, ws, filtered_job_host_summary_dataframe, mode='by_organization')
-                    print(f"DEBUG: Organization data section built for '{organization_name}'")
                     sheet_index += 1
-                    print(f"DEBUG: Organization sheet '{organization_name}' completed.")
 
         if 'data_collection_status' in self.optional_report_sheets():
-            print("DEBUG: Building data_collection_status sheet...")
             ws = self.add_sheet('Data collection status', sheet_index, self.config['status_column_widths'])
-            print("DEBUG: data_collection_status sheet added")
             current_row = self._build_data_section_collection_missing(1, ws, status_dataframe)
-            print("DEBUG: data_collection_status missing section built")
             current_row += 1  # gap
             self._build_data_section_collection_status(current_row, ws, status_dataframe)
-            print("DEBUG: data_collection_status main section built")
             sheet_index += 1
-            print("DEBUG: data_collection_status sheet completed.")
 
-        print("DEBUG: ReportCCSPv2.build_spreadsheet() completed successfully!")
         return self.wb
 
     def _build_table(self, current_row, ws, rows):
@@ -423,10 +312,10 @@ class ReportCCSPv2(Base):
             file_names = unique_file_names.to_list()
         else:  # pandas Series fallback
             file_names = unique_file_names.tolist()
-        
+
         # Create all synthetic records first, then add them in one operation
         synthetic_records = []
-        
+
         for file_name in file_names:
             start = {
                 'collection_start_timestamp': None,
@@ -449,7 +338,7 @@ class ReportCCSPv2(Base):
         if synthetic_records:
             # Create synthetic DataFrame with proper schema
             synthetic = pd.DataFrame(synthetic_records)
-            
+
             # For Polars, ensure compatible schemas by casting types explicitly
             if hasattr(df, 'vstack'):  # Polars DataFrame
                 # Cast synthetic DataFrame columns to match main DataFrame types
@@ -462,7 +351,7 @@ class ReportCCSPv2(Base):
                             # Cast to match the type of the main DataFrame
                             main_col_type = df.select(col).dtypes[0]
                             synthetic = synthetic.with_columns(synthetic[col].cast(main_col_type, strict=False))
-                
+
                 # Use vstack instead of concat for better type compatibility
                 df = df.vstack(synthetic)
             else:  # pandas DataFrame fallback
@@ -470,11 +359,7 @@ class ReportCCSPv2(Base):
 
         # skip failed collects using Polars-compatible syntax
         status_filter = df['status'] == 'ok'
-        df = (
-            df.filter(status_filter)
-            if hasattr(df, 'filter')
-            else df[status_filter]
-        )
+        df = df.filter(status_filter) if hasattr(df, 'filter') else df[status_filter]
 
         # find gaps between until -> next since
         if hasattr(df, 'sort'):  # Polars DataFrame
@@ -489,12 +374,15 @@ class ReportCCSPv2(Base):
         if hasattr(df, 'with_columns'):  # Polars DataFrame
             # Handle timezone-aware datetime strings
             try:
-                df = df.with_columns([
-                    pd.when(pd.col('next_since').is_not_null())
-                    .then(pd.col('next_since').str.to_datetime(strict=False))
-                    .otherwise(None).alias('next_since_dt'),
-                    pd.col('until').str.to_datetime(strict=False).alias('until_dt')
-                ])
+                df = df.with_columns(
+                    [
+                        pd.when(pd.col('next_since').is_not_null())
+                        .then(pd.col('next_since').str.to_datetime(strict=False))
+                        .otherwise(None)
+                        .alias('next_since_dt'),
+                        pd.col('until').str.to_datetime(strict=False).alias('until_dt'),
+                    ]
+                )
                 df = df.with_columns((pd.col('next_since_dt') - pd.col('until_dt')).dt.total_seconds().alias('gap'))
             except Exception:
                 # If conversion still fails, they might already be datetime types
@@ -502,10 +390,12 @@ class ReportCCSPv2(Base):
                     df = df.with_columns((pd.col('next_since') - pd.col('until')).dt.total_seconds().alias('gap'))
                 except Exception:
                     # Last resort: cast to datetime first with strict=False
-                    df = df.with_columns([
-                        pd.col('next_since').cast(pd.Datetime, strict=False).alias('next_since_dt'),
-                        pd.col('until').cast(pd.Datetime, strict=False).alias('until_dt')
-                    ])
+                    df = df.with_columns(
+                        [
+                            pd.col('next_since').cast(pd.Datetime, strict=False).alias('next_since_dt'),
+                            pd.col('until').cast(pd.Datetime, strict=False).alias('until_dt'),
+                        ]
+                    )
                     df = df.with_columns((pd.col('next_since_dt') - pd.col('until_dt')).dt.total_seconds().alias('gap'))
         else:  # pandas DataFrame fallback
             df = df.with_columns((df['next_since'] - df['until']).dt.total_seconds().alias('gap'))
@@ -523,13 +413,14 @@ class ReportCCSPv2(Base):
             dataframe = filtered_df.copy()
 
         dataframe = dataframe[['file_name', 'until', 'next_since', 'gap']]
-        dataframe = self.rename_dataframe(dataframe, 
+        dataframe = self.rename_dataframe(
+            dataframe,
             {
                 'file_name': 'CSV filename',
                 'until': 'Missing from',
                 'next_since': 'Missing until',
                 'gap': 'Gap in seconds',
-            }
+            },
         )
 
         rows = dataframe_to_rows(self.to_pandas_for_excel(dataframe), index=False)
@@ -573,7 +464,8 @@ class ReportCCSPv2(Base):
 
         median_diff = df['time_diff'].median()
 
-        dataframe = self.rename_dataframe(df, 
+        dataframe = self.rename_dataframe(
+            df,
             {
                 'collection_start_timestamp': 'Collection timestamp',
                 'since': 'Filter since',
@@ -582,7 +474,7 @@ class ReportCCSPv2(Base):
                 'status': 'Status',
                 'elapsed': 'Elapsed',
                 'time_diff': 'Time since\nprevious collection',  # col_index
-            }
+            },
         )
 
         rows = dataframe_to_rows(self.to_pandas_for_excel(dataframe), index=False)
@@ -632,13 +524,15 @@ class ReportCCSPv2(Base):
         else:
             # Use Polars-compatible groupby without dropna parameter
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
-                ccsp_report_dataframe = dataframe.group_by('host_name').agg([
-                    pd.col('organization_name').n_unique().alias('organizations'),
-                    pd.col('host_name').count().alias('host_runs'),
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('first_automation').min().alias('first_automation'),
-                    pd.col('last_automation').max().alias('last_automation'),
-                ])
+                ccsp_report_dataframe = dataframe.group_by('host_name').agg(
+                    [
+                        pd.col('organization_name').n_unique().alias('organizations'),
+                        pd.col('host_name').count().alias('host_runs'),
+                        pd.col('task_runs').sum().alias('task_runs'),
+                        pd.col('first_automation').min().alias('first_automation'),
+                        pd.col('last_automation').max().alias('last_automation'),
+                    ]
+                )
             else:  # pandas DataFrame fallback
                 ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
                     organizations=('organization_name', 'nunique'),
@@ -653,10 +547,7 @@ class ReportCCSPv2(Base):
             if hasattr(dataframe, 'pivot'):  # Polars DataFrame
                 try:
                     pivoted_dataframe = dataframe.pivot(
-                        index='host_name',
-                        columns='organization_name',
-                        values='last_automation',
-                        aggregate_function='max'
+                        index='host_name', columns='organization_name', values='last_automation', aggregate_function='max'
                     )
                 except Exception:
                     # If pivot fails, create empty dataframe
@@ -740,20 +631,20 @@ class ReportCCSPv2(Base):
             )
         else:
             # Create combined column for Polars compatibility
-            dataframe = dataframe.with_columns(
-                pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid')
-            )
+            dataframe = dataframe.with_columns(pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid'))
 
             # Use Polars-compatible groupby without dropna parameter
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
-                ccsp_report_dataframe = dataframe.group_by(['organization_name', 'job_template_name']).agg([
-                    pd.col('job_remote_id_install_uuid').n_unique().alias('job_runs'),
-                    pd.col('host_name').n_unique().alias('host_runs_unique'),
-                    pd.col('host_name').count().alias('host_runs'),
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('job_created').min().alias('first_run'),
-                    pd.col('job_created').max().alias('last_run'),
-                ])
+                ccsp_report_dataframe = dataframe.group_by(['organization_name', 'job_template_name']).agg(
+                    [
+                        pd.col('job_remote_id_install_uuid').n_unique().alias('job_runs'),
+                        pd.col('host_name').n_unique().alias('host_runs_unique'),
+                        pd.col('host_name').count().alias('host_runs'),
+                        pd.col('task_runs').sum().alias('task_runs'),
+                        pd.col('job_created').min().alias('first_run'),
+                        pd.col('job_created').max().alias('last_run'),
+                    ]
+                )
             else:  # pandas DataFrame fallback
                 ccsp_report_dataframe = dataframe.groupby(['organization_name', 'job_template_name'], dropna=False).agg(
                     job_runs=('job_remote_id_install_uuid', 'nunique'),
@@ -773,7 +664,8 @@ class ReportCCSPv2(Base):
         else:  # pandas DataFrame fallback
             ccsp_report_dataframe = ccsp_report_dataframe.reindex(columns=columns)
 
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report_dataframe,
             {
                 'job_template_name': 'Job template\nname',
                 'organization_name': 'Organization\nname',
@@ -783,7 +675,7 @@ class ReportCCSPv2(Base):
                 'task_runs': self.NUM_OF_TASKS_OR_RUNS,
                 'first_run': 'First\nrun',
                 'last_run': 'Last\nrun',
-            }
+            },
         )
 
         row_counter = 0
@@ -813,31 +705,23 @@ class ReportCCSPv2(Base):
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'job_remote_id' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame({
-                'organization_name': [],
-                'job_runs': [],
-                'host_runs_unique': [],
-                'host_runs': [],
-                'task_runs': []
-            })
+            ccsp_report_dataframe = pd.DataFrame({'organization_name': [], 'job_runs': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': []})
         else:
             # Get optional sheets configuration early to avoid UnboundLocalError
             optional_sheets = self.optional_report_sheets()
-            print(f"DEBUG: optional_report_sheets = {optional_sheets}")
-            
+            print(f'DEBUG: optional_report_sheets = {optional_sheets}')
+
             # Create combined column for Polars compatibility
-            dataframe = dataframe.with_columns(
-                pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid')
-            )
+            dataframe = dataframe.with_columns(pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid'))
 
             # For now, simplify the aggregation to avoid complex lambda filtering issues
             # Pre-compute the filtered counts for each organization before aggregation
-            
+
             # First, let's try a simpler approach that avoids the complex lambda filtering
             agg_dict = {
                 'job_runs': ('job_remote_id_install_uuid', 'nunique'),
                 'host_runs_unique': ('host_name', 'nunique'),  # Count all for now, filter later if needed
-                'host_runs': ('host_name', 'count'),  # Count all for now, filter later if needed  
+                'host_runs': ('host_name', 'count'),  # Count all for now, filter later if needed
                 'task_runs': ('task_runs', 'sum'),
             }
 
@@ -845,9 +729,9 @@ class ReportCCSPv2(Base):
             if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
                 agg_dict['indirect_host_runs_unique'] = ('host_name', 'nunique')  # Count all for now
                 agg_dict['indirect_host_runs'] = ('host_name', 'count')  # Count all for now
-                print(f"DEBUG: Added indirect columns to agg_dict")
+                print(f'DEBUG: Added indirect columns to agg_dict')
             else:
-                print(f"DEBUG: Skipping indirect columns (not in optional sheets)")
+                print(f'DEBUG: Skipping indirect columns (not in optional sheets)')
 
             # Use Polars-compatible groupby without dropna parameter
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
@@ -858,17 +742,19 @@ class ReportCCSPv2(Base):
                     pd.col('host_name').count().alias('host_runs'),
                     pd.col('task_runs').sum().alias('task_runs'),
                 ]
-                
+
                 # Add the INDIRECT aggregations only if the condition is met
                 if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
-                    agg_exprs.extend([
-                        pd.col('host_name').n_unique().alias('indirect_host_runs_unique'),
-                        pd.col('host_name').count().alias('indirect_host_runs'),
-                    ])
-                    print(f"DEBUG: Added indirect columns to agg_exprs")
+                    agg_exprs.extend(
+                        [
+                            pd.col('host_name').n_unique().alias('indirect_host_runs_unique'),
+                            pd.col('host_name').count().alias('indirect_host_runs'),
+                        ]
+                    )
+                    print(f'DEBUG: Added indirect columns to agg_exprs')
                 else:
-                    print(f"DEBUG: Skipping indirect columns for Polars")
-                
+                    print(f'DEBUG: Skipping indirect columns for Polars')
+
                 ccsp_report_dataframe = dataframe.group_by('organization_name').agg(agg_exprs)
             else:  # pandas DataFrame fallback
                 ccsp_report_dataframe = dataframe.groupby('organization_name', dropna=False).agg(**agg_dict)
@@ -877,19 +763,19 @@ class ReportCCSPv2(Base):
         # Build columns list dynamically based on what actually exists in the dataframe
         base_columns = ['organization_name', 'job_runs', 'host_runs_unique', 'host_runs']
         optional_columns = []
-        print(f"DEBUG: ccsp_report_dataframe.columns = {list(ccsp_report_dataframe.columns)}")
+        print(f'DEBUG: ccsp_report_dataframe.columns = {list(ccsp_report_dataframe.columns)}')
         if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
-            print(f"DEBUG: Checking for indirect columns in dataframe")
+            print(f'DEBUG: Checking for indirect columns in dataframe')
             # Only add indirect columns if they actually exist in the dataframe
             if 'indirect_host_runs_unique' in ccsp_report_dataframe.columns:
                 optional_columns.append('indirect_host_runs_unique')
-                print(f"DEBUG: Added indirect_host_runs_unique to selection")
+                print(f'DEBUG: Added indirect_host_runs_unique to selection')
             if 'indirect_host_runs' in ccsp_report_dataframe.columns:
                 optional_columns.append('indirect_host_runs')
-                print(f"DEBUG: Added indirect_host_runs to selection")
+                print(f'DEBUG: Added indirect_host_runs to selection')
         else:
-            print(f"DEBUG: Skipping indirect columns check")
-        
+            print(f'DEBUG: Skipping indirect columns check')
+
         columns = base_columns + optional_columns + ['task_runs']
 
         # Polars DataFrame column reordering and filtering
@@ -920,17 +806,17 @@ class ReportCCSPv2(Base):
             'host_runs': 'Non-unique managed\nnodes automated',
             'task_runs': 'Number of task\nruns',
         }
-        
+
         # Only add indirect column renames if they exist in the dataframe
         if 'indirect_host_runs_unique' in ccsp_report_dataframe.columns:
             rename_columns['indirect_host_runs_unique'] = 'Unique indirect managed nodes\nautomated'
         if 'indirect_host_runs' in ccsp_report_dataframe.columns:
             rename_columns['indirect_host_runs'] = 'Non-unique indirect managed\nnodes automated'
-        
+
         # Filter rename_columns to only include columns that exist in the dataframe
         filtered_rename_columns = {k: v for k, v in rename_columns.items() if k in ccsp_report_dataframe.columns}
-        print(f"DEBUG: Renaming columns: {list(filtered_rename_columns.keys())}")
-        
+        print(f'DEBUG: Renaming columns: {list(filtered_rename_columns.keys())}')
+
         ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, filtered_rename_columns)
 
         # Sort by organization name to ensure consistent ordering for tests
@@ -1109,19 +995,21 @@ class ReportCCSPv2(Base):
             ccsp_report = pd.DataFrame([ccsp_report])
 
             # order the columns right
-            ccsp_report = ccsp_report.select([
-                'end_user_company_name',
-                'mark_x',
-                'end_user_company_city',
-                'end_user_company_state',
-                'end_user_company_country',
-                'sku_number',
-                'quantity_consumed',
-                'sku_description',
-                'unit_price',
-                'extended_unit_price',
-                'notes',
-            ])
+            ccsp_report = ccsp_report.select(
+                [
+                    'end_user_company_name',
+                    'mark_x',
+                    'end_user_company_city',
+                    'end_user_company_state',
+                    'end_user_company_country',
+                    'sku_number',
+                    'quantity_consumed',
+                    'sku_description',
+                    'unit_price',
+                    'extended_unit_price',
+                    'notes',
+                ]
+            )
 
         else:
             # Generate empty df if there were no billing data - ensure it has the expected columns
@@ -1141,7 +1029,8 @@ class ReportCCSPv2(Base):
             ccsp_report = pd.DataFrame(empty_data)
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report,
             {
                 'end_user_company_name': 'End User Company Name',
                 'mark_x': "Enter 'X' to indicate\nInteral Usage",
@@ -1154,7 +1043,7 @@ class ReportCCSPv2(Base):
                 'unit_price': 'SKU Unit Price',
                 'extended_unit_price': 'SKU Extended Unit\nPrice',
                 'notes': 'Notes',
-            }
+            },
         )
 
         row_counter = 0

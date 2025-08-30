@@ -45,12 +45,10 @@ class DataframeCollectionStatus(Base):
             group_dataframe = self._process_batch_data(batch, batch_data, date)
             if group_dataframe is None or len(group_dataframe) == 0:
                 continue
-                
+
             # Apply rollup schema validation after processing and grouping
             group_dataframe = self.validate_rollup_data(
-                group_dataframe,
-                strict_columns=['file_name', 'status'],
-                default_values=self.get_rollup_default_values()
+                group_dataframe, strict_columns=['file_name', 'status'], default_values=self.get_rollup_default_values()
             )
 
             # Merge with accumulated dataframe (consistent with other dataframes)
@@ -79,13 +77,13 @@ class DataframeCollectionStatus(Base):
 
     def _process_batch_data(self, batch, batch_data, date):
         """Process individual batch data using centralized schema-driven approach.
-        
+
         This method uses the new validation system:
         1. CSV validation using collector_schema
         2. Business logic transformations (minimal for collection status)
         3. Schema application with automatic validation via collector_dataframe_validation_schema
-        
-        All validation, type casting, and column completion is handled by the 
+
+        All validation, type casting, and column completion is handled by the
         centralized schema system in the base class.
         """
         from metrics_utility.tracing import add_span_attributes
@@ -100,14 +98,10 @@ class DataframeCollectionStatus(Base):
         input_row_count = len(batch)
 
         # Step 1: Validate CSV data against collector schema
-        batch = self.validate_collector_data(
-            batch,
-            strict_columns=['file_name', 'status'], 
-            default_values=self.get_collector_default_values()
-        )
-        
+        batch = self.validate_collector_data(batch, strict_columns=['file_name', 'status'], default_values=self.get_collector_default_values())
+
         # Step 2: Apply complete collector_dataframe schema (includes validation)
-        batch = self.apply_complete_schema(batch, schema_type="collector_dataframe", operation_context="after_collection_status_transformations")
+        batch = self.apply_complete_schema(batch, schema_type='collector_dataframe', operation_context='after_collection_status_transformations')
 
         # Add validation metrics for tracing
         final_count = len(batch) if batch is not None else 0
@@ -213,10 +207,10 @@ class DataframeCollectionStatus(Base):
     @staticmethod
     def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
         """Define validation rules for collector dataframe columns.
-        
+
         This schema specifies which columns are required, which can be null,
         and validation rules for collection status data processing.
-        
+
         Returns:
             Dictionary mapping column names to validation rule dictionaries
         """
@@ -224,12 +218,10 @@ class DataframeCollectionStatus(Base):
             # Required identification columns that cannot be null
             'file_name': {'required': True, 'allow_null': False},
             'status': {'required': True, 'allow_null': False},
-            
             # Optional columns that can be null
             'collection_start_timestamp': {'required': False, 'allow_null': True},
             'since': {'required': False, 'allow_null': True},
             'until': {'required': False, 'allow_null': True},
-            
             # Numeric columns with validation
             'elapsed': {'required': False, 'allow_null': True, 'min_value': 0.0},
         }
@@ -237,55 +229,57 @@ class DataframeCollectionStatus(Base):
     @staticmethod
     def collector_schema() -> pa.Schema:
         """Define PyArrow schema for raw CSV collector data validation.
-        
+
         This schema is used for validating data_collection_status CSV data during
         initial collection and processing. It includes all columns that may appear
         in the raw CSV files for collection status tracking.
-        
+
         Returns:
             PyArrow schema for collector data validation
         """
-        return pa.schema([
-            # Index columns (unique identifiers)
-            pa.field("collection_start_timestamp", pa.string()),  # Keep as string for Polars compatibility
-            pa.field("since", pa.string()),  # Keep as string for Polars compatibility
-            pa.field("until", pa.string()),  # Keep as string for Polars compatibility
-            pa.field("file_name", pa.string()),
-            pa.field("status", pa.string()),
-            
-            # Data columns
-            pa.field("elapsed", pa.float64()),
-        ])
+        return pa.schema(
+            [
+                # Index columns (unique identifiers)
+                pa.field('collection_start_timestamp', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('since', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('until', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('file_name', pa.string()),
+                pa.field('status', pa.string()),
+                # Data columns
+                pa.field('elapsed', pa.float64()),
+            ]
+        )
 
     @staticmethod
     def parquet_schema() -> pa.Schema:
         """Define PyArrow schema for aggregated rollup data validation.
-        
+
         This schema is used for validating aggregated collection status data during
         rollup merging operations. It includes only the final aggregated columns
         after group_by operations.
-        
+
         Returns:
             PyArrow schema for rollup data validation
         """
-        return pa.schema([
-            # Index columns (unique identifiers)
-            pa.field("collection_start_timestamp", pa.string()),  # Keep as string for Polars compatibility
-            pa.field("since", pa.string()),  # Keep as string for Polars compatibility  
-            pa.field("until", pa.string()),  # Keep as string for Polars compatibility
-            pa.field("file_name", pa.string()),
-            pa.field("status", pa.string()),
-            
-            # Aggregated data columns
-            pa.field("elapsed", pa.float64()),
-        ])
+        return pa.schema(
+            [
+                # Index columns (unique identifiers)
+                pa.field('collection_start_timestamp', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('since', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('until', pa.string()),  # Keep as string for Polars compatibility
+                pa.field('file_name', pa.string()),
+                pa.field('status', pa.string()),
+                # Aggregated data columns
+                pa.field('elapsed', pa.float64()),
+            ]
+        )
 
     def get_collector_default_values(self) -> Dict[str, Any]:
         """Get custom default values for collector schema columns.
-        
+
         These defaults override the standard type-based defaults for domain-specific
         requirements for collection status processing.
-        
+
         Returns:
             Dictionary mapping column names to custom default values
         """
@@ -300,7 +294,7 @@ class DataframeCollectionStatus(Base):
 
     def get_rollup_default_values(self) -> Dict[str, Any]:
         """Get custom default values for rollup schema columns.
-        
+
         Returns:
             Dictionary mapping column names to custom default values
         """
@@ -316,10 +310,10 @@ class DataframeCollectionStatus(Base):
     @staticmethod
     def operations():
         """Define how to merge rollup data when combining multiple rollup files.
-        
+
         This is used by the summarize_merged_dataframes() method in the base class
         when resolving conflicts from join operations during rollup merging.
-        
+
         Returns:
             dict: Mapping of column_name -> operation for resolving merge conflicts
         """
@@ -330,26 +324,7 @@ class DataframeCollectionStatus(Base):
     @staticmethod
     def collector_dataframe_schema() -> Dict[str, str]:
         """Define Polars dataframe schema for processed CSV data (before grouping).
-        
-        Returns:
-            Dictionary mapping column names to Polars dtypes as strings
-        """
-        return {
-            # Index/metadata columns
-            'collection_start_timestamp': 'String',  # Keep as string for consistency
-            'since': 'String',
-            'until': 'String', 
-            'file_name': 'String',
-            'status': 'String',
-            
-            # Data columns
-            'elapsed': 'Float64',
-        }
 
-    @staticmethod
-    def dataframe_schema() -> Dict[str, str]:
-        """Define Polars dataframe schema for working dataframes (after grouping).
-        
         Returns:
             Dictionary mapping column names to Polars dtypes as strings
         """
@@ -358,13 +333,29 @@ class DataframeCollectionStatus(Base):
             'collection_start_timestamp': 'String',  # Keep as string for consistency
             'since': 'String',
             'until': 'String',
-            'file_name': 'String', 
+            'file_name': 'String',
             'status': 'String',
-            
-            # Aggregated data columns
+            # Data columns
             'elapsed': 'Float64',
         }
 
+    @staticmethod
+    def dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for working dataframes (after grouping).
+
+        Returns:
+            Dictionary mapping column names to Polars dtypes as strings
+        """
+        return {
+            # Index/metadata columns
+            'collection_start_timestamp': 'String',  # Keep as string for consistency
+            'since': 'String',
+            'until': 'String',
+            'file_name': 'String',
+            'status': 'String',
+            # Aggregated data columns
+            'elapsed': 'Float64',
+        }
 
     @traced_method('collection_status.build_group')
     def build_group(self, batch_data):

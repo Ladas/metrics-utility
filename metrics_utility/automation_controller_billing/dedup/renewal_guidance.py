@@ -11,11 +11,9 @@ class BaseDedupRenewal:
     def _cleanup_null_values(self):
         """Clean up null-like values in key fields."""
         # Cleanup ansible_host_variable - Use Polars with_columns
-        self.dataframe = self.dataframe.with_columns(
-            self.dataframe['ansible_host_variable'].str.replace('', None).alias('ansible_host_variable')
-        )
+        self.dataframe = self.dataframe.with_columns(self.dataframe['ansible_host_variable'].str.replace('', None).alias('ansible_host_variable'))
 
-        # Cleanup ansible_product_serial - Use Polars with_columns  
+        # Cleanup ansible_product_serial - Use Polars with_columns
         self.dataframe = self.dataframe.with_columns(
             self.dataframe['ansible_product_serial'].str.replace('NA', None).str.replace('', None).alias('ansible_product_serial')
         )
@@ -85,11 +83,7 @@ class DedupRenewal(BaseDedupRenewal):
 
             # Start with hostname matches using Polars-compatible syntax
             hostname_filter = self.dataframe['hostname'] == row['hostname']
-            dupes = (
-                self.dataframe.filter(hostname_filter)
-                if hasattr(self.dataframe, 'filter')
-                else self.dataframe[hostname_filter]
-            )
+            dupes = self.dataframe.filter(hostname_filter) if hasattr(self.dataframe, 'filter') else self.dataframe[hostname_filter]
 
             # Iterative search to cover indirect relationships
             iterations = int(self.extra_params['report_renewal_guidance_dedup_iterations'])
@@ -159,9 +153,7 @@ class DedupRenewalHostname(BaseDedupRenewal):
             # Find duplicates based on normalized hostname only using Polars-compatible syntax
             normalized_hostname_filter = self.dataframe['normalized_hostname'] == row['normalized_hostname']
             dupes = (
-                self.dataframe.filter(normalized_hostname_filter)
-                if hasattr(self.dataframe, 'filter')
-                else self.dataframe[normalized_hostname_filter]
+                self.dataframe.filter(normalized_hostname_filter) if hasattr(self.dataframe, 'filter') else self.dataframe[normalized_hostname_filter]
             )
             processed_dupes_index.update(dupes['index'])
 
@@ -173,10 +165,12 @@ class DedupRenewalHostname(BaseDedupRenewal):
                 dupes_clean = dupes.clone()
             else:  # pandas DataFrame fallback
                 dupes_clean = dupes.copy()
-            dupes_clean = dupes_clean.with_columns([
-                dupes_clean['ansible_product_serial'].str.replace('NA', None).str.replace('', None).alias('ansible_product_serial'),
-                dupes_clean['ansible_machine_id'].str.replace('NA', None).str.replace('', None).alias('ansible_machine_id')
-            ])
+            dupes_clean = dupes_clean.with_columns(
+                [
+                    dupes_clean['ansible_product_serial'].str.replace('NA', None).str.replace('', None).alias('ansible_product_serial'),
+                    dupes_clean['ansible_machine_id'].str.replace('NA', None).str.replace('', None).alias('ansible_machine_id'),
+                ]
+            )
 
             deduped_list.append(self._build_deduped_record(dupes, latest_hostname, dupes_clean))
 
@@ -350,11 +344,7 @@ class DedupRenewalExperimental(BaseDedupRenewal):
         for compound_serial in compound_serials.unique():
             # Use Polars-compatible filtering syntax
             serial_filter = expanded_df['compound_serial'] == compound_serial
-            serial_matches = (
-                expanded_df.filter(serial_filter)
-                if hasattr(expanded_df, 'filter')
-                else expanded_df[serial_filter]
-            )
+            serial_matches = expanded_df.filter(serial_filter) if hasattr(expanded_df, 'filter') else expanded_df[serial_filter]
             hostname_groups_in_serial = serial_matches['hostname_group'].unique()
             if len(hostname_groups_in_serial) > 1:
                 canonical_group = hostname_groups_in_serial[0]

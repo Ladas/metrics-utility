@@ -228,11 +228,12 @@ class ReportRenewalGuidance(Base):
         ccsp_report = ccsp_report.reindex(columns=['description', 'quantity_consumed'])
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report,
             {
                 'description': 'Description',
                 'quantity_consumed': 'Quantity',
-            }
+            },
         )
 
         row_counter = 0
@@ -294,7 +295,8 @@ class ReportRenewalGuidance(Base):
             ]
         )
 
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report_dataframe,
             {
                 'hostname': 'Host name',
                 'first_automation': 'First\nautomation',
@@ -310,7 +312,7 @@ class ReportRenewalGuidance(Base):
                 'ansible_host_variables': 'Variables ansible_host',
                 'ansible_product_serials': 'Serial Numbers',
                 'ansible_machine_ids': 'Machine UUIDs',
-            }
+            },
         )
 
         row_counter = 0
@@ -347,12 +349,13 @@ class ReportRenewalGuidance(Base):
             ]
         )
 
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report_dataframe, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report_dataframe,
             {
                 'window_start': 'Start of the\nephemeral window',
                 'window_end': 'End of the\nephemeral window',
                 'ephemeral_hosts': 'Ephemeral automated hosts',
-            }
+            },
         )
 
         row_counter = 0

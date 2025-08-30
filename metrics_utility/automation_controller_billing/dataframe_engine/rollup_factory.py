@@ -246,7 +246,7 @@ class RollupDataframeFactory:
             for dataframe_name, dataframe in dataframes.items():
                 if dataframe is not None and len(dataframe) > 0:
                     records_processed = len(dataframe)
-                    
+
                     # ENHANCEMENT: Collect validation metrics from dataframe instance if available
                     validation_metrics = None
                     if hasattr(self, '_dataframe_instances') and dataframe_name in self._dataframe_instances:
@@ -255,7 +255,7 @@ class RollupDataframeFactory:
                             validation_metrics = dataframe_instance.get_validation_metrics()
                             if validation_metrics:
                                 self.logger.debug(f'Collected {len(validation_metrics)} validation metrics for {dataframe_name}')
-                    
+
                     rollup_manager.save_rollup_data(target_date, dataframe_name, dataframe, records_processed, processing_time, validation_metrics)
                     self.logger.info(f'✓ Stored rollup for {dataframe_name} on {target_date} with {records_processed} records')
                 else:
@@ -267,7 +267,7 @@ class RollupDataframeFactory:
         """Create dataframes for a specific date using unified data loading"""
         # Build batch data iterator for this specific date
         batch_data_iterator = extractor.iter_batches(target_date)
-        
+
         # Initialize dataframe instances storage for validation metrics collection
         if not hasattr(self, '_dataframe_instances'):
             self._dataframe_instances = {}

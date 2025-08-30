@@ -30,7 +30,7 @@ import pyarrow as pa
 
 from opentelemetry import trace
 
-from metrics_utility.automation_controller_billing.dataframe_engine.base import Base, convert_json_to_list_pairs, convert_list_pairs_to_dict
+from metrics_utility.automation_controller_billing.dataframe_engine.base import Base
 from metrics_utility.automation_controller_billing.helpers import parse_json_array
 from metrics_utility.metric_utils import DIRECT, INDIRECT, MANAGED_NODE_TYPES
 from metrics_utility.tracing import add_span_attributes, traced_method
@@ -71,149 +71,141 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def jobhost_summary_csv_schema() -> pa.Schema:
         """Define PyArrow schema for job_host_summary CSV data validation.
-        
+
         This schema validates raw CSV data from the job_host_summary table,
         used for DIRECT managed node processing.
-        
+
         Returns:
             PyArrow schema for direct managed node CSV validation
         """
-        return pa.schema([
-            # Core identification columns
-            pa.field("host_name", pa.string()),
-            pa.field("organization_name", pa.string()),
-            pa.field("job_template_name", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            
-            # Timestamp columns (keep as string for consistent parsing)
-            pa.field("created", pa.string()),
-            pa.field("job_created", pa.string()),
-            
-            # Task counter columns (for direct managed nodes)
-            pa.field("dark", pa.int64()),
-            pa.field("failures", pa.int64()),
-            pa.field("ok", pa.int64()),
-            pa.field("skipped", pa.int64()),
-            pa.field("ignored", pa.int64()),
-            pa.field("rescued", pa.int64()),
-            
-            # Optional host mapping
-            pa.field("ansible_host_variable", pa.string()),
-        ])
+        return pa.schema(
+            [
+                # Core identification columns
+                pa.field('host_name', pa.string()),
+                pa.field('organization_name', pa.string()),
+                pa.field('job_template_name', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                # Timestamp columns (keep as string for consistent parsing)
+                pa.field('created', pa.string()),
+                pa.field('job_created', pa.string()),
+                # Task counter columns (for direct managed nodes)
+                pa.field('dark', pa.int64()),
+                pa.field('failures', pa.int64()),
+                pa.field('ok', pa.int64()),
+                pa.field('skipped', pa.int64()),
+                pa.field('ignored', pa.int64()),
+                pa.field('rescued', pa.int64()),
+                # Optional host mapping
+                pa.field('ansible_host_variable', pa.string()),
+            ]
+        )
 
     @staticmethod
     def indirect_nodes_csv_schema() -> pa.Schema:
         """Define PyArrow schema for indirect_nodes CSV data validation.
-        
+
         This schema validates raw CSV data from the indirect_nodes table,
         used for INDIRECT managed node processing.
-        
+
         Returns:
             PyArrow schema for indirect managed node CSV validation
         """
-        return pa.schema([
-            # Core identification columns
-            pa.field("host_name", pa.string()),
-            pa.field("organization_name", pa.string()),
-            pa.field("job_template_name", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            
-            # Timestamp columns (keep as string for consistent parsing)
-            pa.field("created", pa.string()),
-            pa.field("job_created", pa.string()),
-            
-            # Optional host mapping
-            pa.field("ansible_host_variable", pa.string()),
-            
-            # Complex data columns (stored as JSON strings)
-            pa.field("canonical_facts", pa.string()),
-            pa.field("facts", pa.string()),
-            pa.field("events", pa.string()),
-        ])
+        return pa.schema(
+            [
+                # Core identification columns
+                pa.field('host_name', pa.string()),
+                pa.field('organization_name', pa.string()),
+                pa.field('job_template_name', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                # Timestamp columns (keep as string for consistent parsing)
+                pa.field('created', pa.string()),
+                pa.field('job_created', pa.string()),
+                # Optional host mapping
+                pa.field('ansible_host_variable', pa.string()),
+                # Complex data columns (stored as JSON strings)
+                pa.field('canonical_facts', pa.string()),
+                pa.field('facts', pa.string()),
+                pa.field('events', pa.string()),
+            ]
+        )
 
     @staticmethod
     def collector_schema() -> pa.Schema:
         """Define PyArrow schema for raw CSV collector data validation.
-        
+
         This method selects the appropriate schema based on the data source.
         For this wrapper, we support both jobhost_summary and indirect_nodes.
         The actual validation happens in _validate_csv_data method.
-        
+
         Returns:
             Combined PyArrow schema covering both data sources
         """
         # Return a combined schema that covers both data sources
         # Individual validation happens in _validate_csv_data
-        return pa.schema([
-            # Common columns across both sources
-            pa.field("host_name", pa.string()),
-            pa.field("organization_name", pa.string()),
-            pa.field("job_template_name", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            pa.field("created", pa.string()),
-            pa.field("job_created", pa.string()),
-            pa.field("ansible_host_variable", pa.string()),
-            
-            # Task counters (jobhost_summary only)
-            pa.field("dark", pa.int64()),
-            pa.field("failures", pa.int64()),
-            pa.field("ok", pa.int64()),
-            pa.field("skipped", pa.int64()),
-            pa.field("ignored", pa.int64()),
-            pa.field("rescued", pa.int64()),
-            
-            # Complex data (indirect_nodes only)
-            pa.field("canonical_facts", pa.string()),
-            pa.field("facts", pa.string()),
-            pa.field("events", pa.string()),
-        ])
+        return pa.schema(
+            [
+                # Common columns across both sources
+                pa.field('host_name', pa.string()),
+                pa.field('organization_name', pa.string()),
+                pa.field('job_template_name', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                pa.field('created', pa.string()),
+                pa.field('job_created', pa.string()),
+                pa.field('ansible_host_variable', pa.string()),
+                # Task counters (jobhost_summary only)
+                pa.field('dark', pa.int64()),
+                pa.field('failures', pa.int64()),
+                pa.field('ok', pa.int64()),
+                pa.field('skipped', pa.int64()),
+                pa.field('ignored', pa.int64()),
+                pa.field('rescued', pa.int64()),
+                # Complex data (indirect_nodes only)
+                pa.field('canonical_facts', pa.string()),
+                pa.field('facts', pa.string()),
+                pa.field('events', pa.string()),
+            ]
+        )
 
     @staticmethod
     def collector_dataframe_schema() -> Dict[str, str]:
         """Define Polars dataframe schema for processed CSV data (before grouping).
-        
+
         This unified schema is applied after CSV processing but before the group() method.
         Both jobhost_summary and indirect_nodes data are converted to this common format.
         All columns are in their final types ready for aggregation operations.
-        
+
         Returns:
             Dictionary mapping column names to Polars dtypes as strings
         """
         return {
             # Index columns (unique identifiers)
             'organization_name': 'String',
-            'job_template_name': 'String', 
+            'job_template_name': 'String',
             'host_name': 'String',
             'original_host_name': 'String',
             'install_uuid': 'String',
             'job_remote_id': 'Int64',
-            
             # Timestamp columns (use proper datetime types)
             'created': 'Datetime',
             'job_created': 'Datetime',
-            
             # Metadata columns
             'managed_node_type': 'Int64',
             'managed_node_type_string': 'String',
             'ansible_host_variable': 'String',
-            
-            # Task counter columns (for direct managed nodes, 0 for indirect)  
+            # Task counter columns (for direct managed nodes, 0 for indirect)
             'dark': 'Int64',
             'failures': 'Int64',
             'ok': 'Int64',
-            'skipped': 'Int64', 
+            'skipped': 'Int64',
             'ignored': 'Int64',
             'rescued': 'Int64',
-            
             # Calculated columns
             'host_runs': 'Int64',
             'task_runs': 'Int64',
             'reachable_task_runs': 'Int64',
-            
-            # Complex data columns - Native Polars types after transformation from CSV
-            'canonical_facts': 'List',  # Native List type (key-value pairs) after JSON parsing
-            'facts': 'List',  # Native List type (key-value pairs) after JSON parsing
-            
+            # Complex data columns - JSON strings for consistent processing
+            'canonical_facts': 'String',  # JSON string for key-value pairs
+            'facts': 'String',  # JSON string for key-value pairs
             # Collections as native List types after transformation
             'events': 'List',  # Native List[String] for events
             'host_names_before_dedup': 'List',  # Native List[String] for host tracking
@@ -222,12 +214,12 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def dataframe_schema() -> Dict[str, str]:
         """Define Polars dataframe schema for working dataframes (after grouping).
-        
+
         This schema is used for:
         - Data after group() aggregation
-        - Data when merging multiple rollups  
+        - Data when merging multiple rollups
         - Data in report generation
-        
+
         Returns:
             Dictionary mapping column names to Polars dtypes as strings
         """
@@ -235,11 +227,10 @@ class DataframeJobhostSummaryUsage(Base):
             # Index columns (unique identifiers)
             'organization_name': 'String',
             'job_template_name': 'String',
-            'host_name': 'String', 
+            'host_name': 'String',
             'original_host_name': 'String',
             'install_uuid': 'String',
             'job_remote_id': 'Int64',
-            
             # Aggregated data columns
             'host_runs': 'Int64',
             'task_runs': 'Int64',
@@ -247,11 +238,9 @@ class DataframeJobhostSummaryUsage(Base):
             'last_automation': 'Datetime',
             'job_created': 'Datetime',
             'managed_node_type': 'Int64',
-            
-            # Complex aggregated data - Native Polars types for processing
-            'canonical_facts': 'List',  # Native List type (key-value pairs) for facts aggregation
-            'facts': 'List',  # Native List type (key-value pairs) for facts aggregation
-            
+            # Complex aggregated data - JSON strings for consistent processing
+            'canonical_facts': 'String',  # JSON string for key-value pairs
+            'facts': 'String',  # JSON string for key-value pairs
             # Collections as native List types for efficient aggregation
             'managed_node_types_set': 'List',  # Native List[String] for node types
             'events': 'List',  # Native List[String] for events
@@ -261,50 +250,50 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def parquet_schema() -> pa.Schema:
         """Define PyArrow schema for aggregated rollup data validation.
-        
+
         This schema is used for validating aggregated data during rollup merging operations.
         It includes only the final aggregated columns after group_by operations.
-        
+
         Returns:
             PyArrow schema for rollup data validation
         """
-        return pa.schema([
-            # Index columns (unique identifiers)
-            pa.field("organization_name", pa.string()),
-            pa.field("job_template_name", pa.string()),
-            pa.field("host_name", pa.string()),
-            pa.field("original_host_name", pa.string()),
-            pa.field("install_uuid", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            
-            # Aggregated data columns
-            pa.field("host_runs", pa.int64()),
-            pa.field("task_runs", pa.int64()),
-            pa.field("first_automation", pa.timestamp('us')),  # Proper timestamp for datetime data
-            pa.field("last_automation", pa.timestamp('us')),  # Proper timestamp for datetime data
-            pa.field("job_created", pa.timestamp('us')),  # Proper timestamp for datetime data
-            pa.field("managed_node_type", pa.int64()),
-            
-            # Complex aggregated data (JSON strings for merging compatibility)
-            pa.field("managed_node_types_set", pa.string()),  # JSON array string
-            pa.field("canonical_facts", pa.string()),  # JSON object string
-            pa.field("facts", pa.string()),  # JSON object string
-            pa.field("events", pa.string()),  # JSON array string
-            pa.field("host_names_before_dedup", pa.string()),  # JSON array string
-        ])
+        return pa.schema(
+            [
+                # Index columns (unique identifiers)
+                pa.field('organization_name', pa.string()),
+                pa.field('job_template_name', pa.string()),
+                pa.field('host_name', pa.string()),
+                pa.field('original_host_name', pa.string()),
+                pa.field('install_uuid', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                # Aggregated data columns
+                pa.field('host_runs', pa.int64()),
+                pa.field('task_runs', pa.int64()),
+                pa.field('first_automation', pa.timestamp('us')),  # Proper timestamp for datetime data
+                pa.field('last_automation', pa.timestamp('us')),  # Proper timestamp for datetime data
+                pa.field('job_created', pa.timestamp('us')),  # Proper timestamp for datetime data
+                pa.field('managed_node_type', pa.int64()),
+                # Complex aggregated data (JSON strings for merging compatibility)
+                pa.field('managed_node_types_set', pa.string()),  # JSON array string
+                pa.field('canonical_facts', pa.string()),  # JSON object string
+                pa.field('facts', pa.string()),  # JSON object string
+                pa.field('events', pa.string()),  # JSON array string
+                pa.field('host_names_before_dedup', pa.string()),  # JSON array string
+            ]
+        )
 
     def get_collector_default_values(self) -> Dict[str, Any]:
         """Get custom default values for collector schema columns.
-        
+
         These defaults override the standard type-based defaults for domain-specific
         requirements like JSON strings and collections.
-        
+
         Returns:
             Dictionary mapping column names to custom default values
         """
         return {
-            'canonical_facts': [],  # Empty list for native List (key-value pairs)
-            'facts': [],  # Empty list for native List (key-value pairs)
+            'canonical_facts': '{}',  # Empty JSON object string for consistent processing
+            'facts': '{}',  # Empty JSON object string for consistent processing
             'events': [],  # Empty list for native List
             'host_names_before_dedup': [],  # Empty list for native List
             'managed_node_types_set': [],  # Empty list for native List
@@ -326,15 +315,15 @@ class DataframeJobhostSummaryUsage(Base):
 
     def get_rollup_default_values(self) -> Dict[str, Any]:
         """Get custom default values for rollup schema columns.
-        
-        Uses native types to match dataframe_schema().
-        
+
+        Uses JSON strings to match dataframe_schema().
+
         Returns:
             Dictionary mapping column names to custom default values
         """
         return {
-            'canonical_facts': [],  # Empty list for native List (key-value pairs)
-            'facts': [],  # Empty list for native List (key-value pairs)
+            'canonical_facts': '{}',  # Empty JSON object string for aggregated data
+            'facts': '{}',  # Empty JSON object string for aggregated data
             'events': [],  # Empty list for native List
             'host_names_before_dedup': [],  # Empty list for native List
             'managed_node_types_set': [],  # Empty list for native List
@@ -355,10 +344,10 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
         """Define validation rules for collector dataframe columns.
-        
+
         This schema specifies which columns are required, which can be null,
         and validation rules for jobhost summary and indirect nodes data processing.
-        
+
         Returns:
             Dictionary mapping column names to validation rule dictionaries
         """
@@ -369,18 +358,15 @@ class DataframeJobhostSummaryUsage(Base):
             'organization_name': {'required': True, 'allow_null': False},
             'job_remote_id': {'required': True, 'allow_null': False, 'min_value': 1},
             'install_uuid': {'required': True, 'allow_null': False},
-            
             # Required data columns with validation
             'managed_node_type': {'required': True, 'allow_null': False, 'valid_values': [0, 1]},  # DIRECT=0, INDIRECT=1
             'host_runs': {'required': True, 'allow_null': False, 'min_value': 1},  # Each record represents at least one host run
             'task_runs': {'required': True, 'allow_null': False, 'min_value': 0},  # Can be 0 for hosts with no reachable tasks
             'reachable_task_runs': {'required': True, 'allow_null': False, 'min_value': 0},
-            
             # Optional columns that can be null
             'job_template_name': {'required': False, 'allow_null': True},
             'ansible_host_variable': {'required': False, 'allow_null': True},
             'managed_node_type_string': {'required': False, 'allow_null': True},
-            
             # Task counter columns (only for direct managed nodes, but schema validation allows nulls)
             'dark': {'required': False, 'allow_null': True, 'min_value': 0},
             'failures': {'required': False, 'allow_null': True, 'min_value': 0},
@@ -388,7 +374,6 @@ class DataframeJobhostSummaryUsage(Base):
             'skipped': {'required': False, 'allow_null': True, 'min_value': 0},
             'ignored': {'required': False, 'allow_null': True, 'min_value': 0},
             'rescued': {'required': False, 'allow_null': True, 'min_value': 0},
-            
             # JSON columns can be null/empty
             'canonical_facts': {'required': False, 'allow_null': True},
             'facts': {'required': False, 'allow_null': True},
@@ -408,8 +393,19 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def data_columns():
         """Define data columns that need aggregation when grouping records."""
-        return ['host_runs', 'task_runs', 'first_automation', 'last_automation', 'job_created', 'managed_node_type', 
-                'canonical_facts', 'facts', 'managed_node_types_set', 'events', 'host_names_before_dedup']
+        return [
+            'host_runs',
+            'task_runs',
+            'first_automation',
+            'last_automation',
+            'job_created',
+            'managed_node_type',
+            'canonical_facts',
+            'facts',
+            'managed_node_types_set',
+            'events',
+            'host_names_before_dedup',
+        ]
 
     @staticmethod
     def initial_aggregations():
@@ -434,11 +430,11 @@ class DataframeJobhostSummaryUsage(Base):
     @staticmethod
     def operations():
         """Define how to merge rollup data when combining multiple rollup files.
-        
+
         NOTE: This method is no longer used since we switched to concat+regroup approach.
         Previously used by summarize_merged_dataframes() for resolving join conflicts.
         Now the regroup() method handles all aggregation logic directly.
-        
+
         TODO: Remove this method after confirming concat+regroup works correctly.
         """
         # No longer used with concat+regroup approach
@@ -450,11 +446,11 @@ class DataframeJobhostSummaryUsage(Base):
 
     def _validate_csv_data(self, billing_data, managed_node_type):
         """Validate CSV data against the appropriate schema based on managed node type.
-        
+
         Args:
             billing_data: Raw DataFrame from CSV
             managed_node_type: DIRECT or INDIRECT constant
-            
+
         Returns:
             Validated DataFrame with schema applied
         """
@@ -462,12 +458,10 @@ class DataframeJobhostSummaryUsage(Base):
             schema = self.jobhost_summary_csv_schema()
         else:  # INDIRECT
             schema = self.indirect_nodes_csv_schema()
-            
+
         # Apply validation using the base class method
         return self.validate_collector_data(
-            billing_data, 
-            strict_columns=['host_name', 'job_remote_id'],
-            default_values=self.get_collector_default_values()
+            billing_data, strict_columns=['host_name', 'job_remote_id'], default_values=self.get_collector_default_values()
         )
 
     # ========================================
@@ -476,7 +470,7 @@ class DataframeJobhostSummaryUsage(Base):
 
     def _process_batch_data_with_schema(self, batch_data, current_span):
         """Process batch data and apply collector_dataframe_schema (BEFORE grouping).
-        
+
         Override base class method to avoid double schema application since
         _process_individual_batch_data already applies the schema.
         """
@@ -495,7 +489,7 @@ class DataframeJobhostSummaryUsage(Base):
         Args:
             batch_data: Dictionary containing batch data with keys:
                        - 'job_host_summary': DataFrame with direct managed node data
-                       - 'indirect_nodes': DataFrame with indirect managed node data  
+                       - 'indirect_nodes': DataFrame with indirect managed node data
                        - 'config': Configuration including install_uuid
                        - '_date_context': Date for this batch
 
@@ -519,29 +513,31 @@ class DataframeJobhostSummaryUsage(Base):
 
         date = batch_data.get('_date_context')  # Get date from context
         processed_data = self._process_individual_batch_data(billing_data, batch_data, managed_node_type, current_span, date)
-        
+
         if processed_data is None or len(processed_data) == 0:
             return None
-            
+
         # Filter out any records with empty/null host names - these should not be processed
         if 'host_name' in processed_data.columns:
-            valid_hosts_mask = (processed_data['host_name'].is_not_null()) & (processed_data['host_name'] != '') & (processed_data['host_name'] != 'null')
+            valid_hosts_mask = (
+                (processed_data['host_name'].is_not_null()) & (processed_data['host_name'] != '') & (processed_data['host_name'] != 'null')
+            )
             processed_data = processed_data.filter(valid_hosts_mask)
             if len(processed_data) == 0:
-                print(f"DEBUG: Filtered out all records with empty host names for {date}")
+                print(f'DEBUG: Filtered out all records with empty host names for {date}')
                 return None
 
         return processed_data
 
     def _add_summary_validation_metrics(self, groups_processed: int, total_input_records: int, final_record_count: int, build_duration: float):
         """Add summary validation metrics for the entire dataframe build process."""
-        
+
         # Calculate summary statistics from collected batch metrics
         total_input_rows = 0
-        total_valid_rows = 0 
+        total_valid_rows = 0
         total_invalid_rows = 0
         dates_with_data = set()
-        
+
         for key, value in self._validation_metrics.items():
             if 'data_quality_by_date' in key and 'input_rows' in key:
                 total_input_rows += value
@@ -553,7 +549,7 @@ class DataframeJobhostSummaryUsage(Base):
                 total_valid_rows += value
             elif 'data_quality_by_date' in key and 'invalid_rows' in key:
                 total_invalid_rows += value
-        
+
         # Add comprehensive summary metrics
         summary_metrics = {
             'data_quality_summary.total_input_rows': total_input_rows,
@@ -567,18 +563,18 @@ class DataframeJobhostSummaryUsage(Base):
             'processing_summary.build_duration_seconds': build_duration,
             'processing_summary.records_per_second': total_input_records / build_duration if build_duration > 0 else 0,
         }
-        
+
         self._add_validation_metrics(summary_metrics)
 
     def _process_individual_batch_data(self, billing_data, batch_data, managed_node_type, current_span, date):
         """Process individual batch data using centralized schema-driven approach.
-        
+
         This method replaces the old inline schema validation with clean, centralized processing:
         1. CSV validation using appropriate schema (jobhost_summary vs indirect_nodes)
         2. Business logic transformations (task calculations, host mapping, etc.)
         3. Column standardization for unified collector_dataframe_schema format
-        
-        All schema validation, type casting, and column completion is handled by the 
+
+        All schema validation, type casting, and column completion is handled by the
         centralized schema system in the base class.
         """
         from metrics_utility.tracing import add_span_attributes
@@ -591,18 +587,18 @@ class DataframeJobhostSummaryUsage(Base):
 
         # Step 1: Validate CSV data against appropriate schema
         billing_data = self._validate_csv_data(billing_data, managed_node_type)
-        
+
         # Step 2: Add core metadata columns
         billing_data = self._add_metadata_columns(billing_data, batch_data, managed_node_type)
-        
+
         # Step 3: Apply business logic transformations
         if managed_node_type == DIRECT:
             billing_data = self._process_direct_managed_nodes(billing_data, current_span, date)
         else:  # INDIRECT
             billing_data = self._process_indirect_managed_nodes(billing_data, current_span, date)
-            
+
         # Step 4: Apply complete collector_dataframe schema (includes validation)
-        billing_data = self.apply_complete_schema(billing_data, schema_type="collector_dataframe", operation_context="after_jobhost_transformations")
+        billing_data = self.apply_complete_schema(billing_data, schema_type='collector_dataframe', operation_context='after_jobhost_transformations')
 
         # Add validation metrics for tracing
         final_count = len(billing_data) if billing_data is not None else 0
@@ -614,7 +610,7 @@ class DataframeJobhostSummaryUsage(Base):
                 f'data_quality.{date.isoformat()}.managed_node_type': managed_node_type,
             },
         )
-        
+
         # Store validation metrics for rollup metadata
         date_key = date.isoformat()
         batch_metrics = {
@@ -628,32 +624,34 @@ class DataframeJobhostSummaryUsage(Base):
 
     def _add_metadata_columns(self, billing_data, batch_data, managed_node_type):
         """Add core metadata columns required for all records."""
-        return billing_data.with_columns([
-            pd.lit(managed_node_type).cast(pd.Int64).alias('managed_node_type'),
-            pd.lit(MANAGED_NODE_TYPES[managed_node_type]).alias('managed_node_type_string'),
-            pd.lit(batch_data['config']['install_uuid']).alias('install_uuid'),
-            billing_data['host_name'].alias('original_host_name'),
-        ])
+        return billing_data.with_columns(
+            [
+                pd.lit(managed_node_type).cast(pd.Int64).alias('managed_node_type'),
+                pd.lit(MANAGED_NODE_TYPES[managed_node_type]).alias('managed_node_type_string'),
+                pd.lit(batch_data['config']['install_uuid']).alias('install_uuid'),
+                billing_data['host_name'].alias('original_host_name'),
+            ]
+        )
 
     def _process_direct_managed_nodes(self, billing_data, current_span, date):
         """Process direct managed nodes (from job_host_summary CSV)."""
+        # Add initial host_runs
+        billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
+
         # Apply ansible_host_variable mapping if present
         billing_data = self._apply_host_variable_mapping(billing_data)
-        
-        # Add host tracking columns
-        billing_data = billing_data.with_columns([
-            billing_data['host_name'].alias('host_names_before_dedup'),
-            pd.lit(1).alias('host_runs')
-        ])
+
+        # Add host tracking columns AFTER hostname mapping to capture final hostnames
+        billing_data = billing_data.with_columns(
+            [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
+        )
 
         # Calculate task_runs by summing task counters
         task_calc_start = time.time()
         expected_columns = ['dark', 'failures', 'ok', 'skipped', 'ignored', 'rescued']
         available_columns = [col for col in expected_columns if col in billing_data.columns]
         if available_columns:
-            billing_data = billing_data.with_columns(
-                pd.sum_horizontal([pd.col(col).fill_null(0) for col in available_columns]).alias('task_runs')
-            )
+            billing_data = billing_data.with_columns(pd.sum_horizontal([pd.col(col).fill_null(0) for col in available_columns]).alias('task_runs'))
         else:
             billing_data = billing_data.with_columns(pd.lit(0).alias('task_runs'))
 
@@ -686,45 +684,25 @@ class DataframeJobhostSummaryUsage(Base):
 
     def _process_indirect_managed_nodes(self, billing_data, current_span, date):
         """Process indirect managed nodes (from indirect_nodes CSV)."""
+        # Add initial host_runs
+        billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
+
         # Apply ansible_host_variable mapping if present
         billing_data = self._apply_host_variable_mapping(billing_data)
-        
-        # Add host tracking columns
-        billing_data = billing_data.with_columns([
-            billing_data['host_name'].alias('host_names_before_dedup'),
-            pd.lit(1).alias('host_runs')
-        ])
+
+        # Add host tracking columns AFTER hostname mapping to capture final hostnames
+        billing_data = billing_data.with_columns(
+            [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
+        )
 
         # For indirect nodes, task_runs is always 1 (each record represents one task)
         billing_data = billing_data.with_columns(pd.lit(1).alias('task_runs'))
-        
+
         # Set reachable_task_runs same as task_runs for indirect nodes
         billing_data = billing_data.with_columns(pd.lit(1).alias('reachable_task_runs'))
 
-        # Convert JSON strings to native types (following Stage 2 of data flow)
-        # Using centralized conversion function from base class
-
-        def convert_json_to_list(json_str):
-            """Convert JSON string to native list for Polars List"""
-            import json
-            if json_str is None or json_str == '':
-                return []
-            try:
-                parsed = json.loads(json_str)
-                return parsed if isinstance(parsed, list) else []
-            except (json.JSONDecodeError, TypeError):
-                return []
-
-        # Convert complex data columns to native types for efficient processing
-        if 'canonical_facts' in billing_data.columns:
-            billing_data = billing_data.with_columns(
-                billing_data['canonical_facts'].map_elements(convert_json_to_list_pairs, return_dtype=pd.List(pd.List(pd.Utf8))).alias('canonical_facts')
-            )
-
-        if 'facts' in billing_data.columns:
-            billing_data = billing_data.with_columns(
-                billing_data['facts'].map_elements(convert_json_to_list_pairs, return_dtype=pd.List(pd.List(pd.Utf8))).alias('facts')
-            )
+        # Keep canonical_facts and facts as JSON strings for consistent processing
+        # No conversion needed - schema expects String format throughout
 
         if 'events' in billing_data.columns:
             # Parse events array and convert to native list
@@ -745,16 +723,18 @@ class DataframeJobhostSummaryUsage(Base):
         """Apply ansible_host_variable mapping to determine final host_name."""
         if 'ansible_host_variable' in billing_data.columns:
             # Replace missing or empty ansible_host_variable with host name and use it as host_name
-            billing_data = billing_data.with_columns([
-                pd.when((billing_data['ansible_host_variable'].is_null()) | (billing_data['ansible_host_variable'] == ''))
-                .then(billing_data['host_name'])
-                .otherwise(billing_data['ansible_host_variable'])
-                .alias('ansible_host_variable')
-            ])
-            billing_data = billing_data.with_columns([billing_data['ansible_host_variable'].alias('host_name')])
-        
-        return billing_data
+            billing_data = billing_data.with_columns(
+                [
+                    pd.when((billing_data['ansible_host_variable'].is_null()) | (billing_data['ansible_host_variable'] == ''))
+                    .then(billing_data['host_name'])
+                    .otherwise(billing_data['ansible_host_variable'])
+                    .alias('ansible_host_variable')
+                ]
+            )
 
+            billing_data = billing_data.with_columns([billing_data['ansible_host_variable'].alias('host_name')])
+
+        return billing_data
 
     def _finalize_dataframe(
         self,
@@ -825,7 +805,7 @@ class DataframeJobhostSummaryUsage(Base):
     @traced_method('jobhost_summary.group')
     def group(self, dataframe):
         """Group and aggregate dataframe with performance tracking.
-        
+
         TODO: Improve complex type aggregation to handle JSON strings and sets properly.
         Currently using simplified aggregation that may not properly merge complex data types.
         Need to implement proper JSON set merging and dict value combining for production use.
@@ -848,47 +828,97 @@ class DataframeJobhostSummaryUsage(Base):
             # Use proper aggregation for both numeric and complex data types
             # Follow demo_prompt_facts.md approach for facts aggregation
             from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts, merge_list_arrays
-            
+
             group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
                 [
                     # Numeric aggregations
                     pd.col('task_runs').sum().alias('task_runs'),
                     pd.col('host_name').count().alias('host_runs'),
-                    
                     # CRITICAL: Filter null values before min/max aggregation to prevent inconsistent results
                     # This ensures that null values don't interfere with timestamp aggregation during initial CSV processing
                     pd.col('created').filter(pd.col('created').is_not_null()).min().alias('first_automation'),
                     pd.col('created').filter(pd.col('created').is_not_null()).max().alias('last_automation'),
                     pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
                     pd.col('managed_node_type').min().alias('managed_node_type'),
-                    
-                    # Complex type aggregations using native types
-                    # Facts: Use native Struct aggregation - first() for single batch processing
-                    pd.col('canonical_facts').filter(pd.col('canonical_facts').is_not_null()).first().alias('canonical_facts'),
-                    pd.col('facts').filter(pd.col('facts').is_not_null()).first().alias('facts'),
-                    
+                    # Complex type aggregations - JSON strings (merge values properly)
+                    # Facts: Merge JSON string values using merge_and_stringify_facts
+                    pd.col('canonical_facts')
+                    .filter(pd.col('canonical_facts').is_not_null())
+                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                    .first()
+                    .alias('canonical_facts'),
+                    pd.col('facts')
+                    .filter(pd.col('facts').is_not_null())
+                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                    .first()
+                    .alias('facts'),
                     # Collections: Collect values into lists - handle both String and List inputs safely
-                    pd.col('managed_node_type_string').filter(pd.col('managed_node_type_string').is_not_null()).map_batches(
-                        lambda s: pd.Series([sorted(list(set([str(v) for v in s.to_list() if v is not None])))]),
-                        return_dtype=pd.List(pd.Utf8)
-                    ).first().alias('managed_node_types_list'),
-                    pd.col('events').filter(pd.col('events').is_not_null()).map_batches(
-                        lambda s: pd.Series([sorted(list(set([str(item) for sublist in s.to_list() if sublist is not None for item in (sublist if isinstance(sublist, list) else [sublist]) if item is not None])))]),
-                        return_dtype=pd.List(pd.Utf8)
-                    ).first().alias('events_list'), 
-                    pd.col('host_names_before_dedup').filter(pd.col('host_names_before_dedup').is_not_null()).map_batches(
-                        lambda s: pd.Series([sorted(list(set([str(v) for v in s.to_list() if v is not None])))]),
-                        return_dtype=pd.List(pd.Utf8)
-                    ).first().alias('host_names_list'),
+                    pd.col('managed_node_type_string')
+                    .filter(pd.col('managed_node_type_string').is_not_null())
+                    .map_batches(
+                        lambda s: pd.Series([sorted(list(set([str(v) for v in s.to_list() if v is not None])))]), return_dtype=pd.List(pd.Utf8)
+                    )
+                    .first()
+                    .alias('managed_node_types_list'),
+                    pd.col('events')
+                    .filter(pd.col('events').is_not_null())
+                    .map_batches(
+                        lambda s: pd.Series(
+                            [
+                                sorted(
+                                    list(
+                                        set(
+                                            [
+                                                str(item)
+                                                for sublist in s.to_list()
+                                                if sublist is not None
+                                                for item in (sublist if isinstance(sublist, list) else [sublist])
+                                                if item is not None
+                                            ]
+                                        )
+                                    )
+                                )
+                            ]
+                        ),
+                        return_dtype=pd.List(pd.Utf8),
+                    )
+                    .first()
+                    .alias('events_list'),
+                    pd.col('host_names_before_dedup')
+                    .filter(pd.col('host_names_before_dedup').is_not_null())
+                    .map_batches(
+                        lambda s: pd.Series(
+                            [
+                                sorted(
+                                    list(
+                                        set(
+                                            [
+                                                str(item)
+                                                for sublist in s.to_list()
+                                                if sublist is not None
+                                                for item in (sublist if isinstance(sublist, list) else [sublist])
+                                                if item is not None
+                                            ]
+                                        )
+                                    )
+                                )
+                            ]
+                        ),
+                        return_dtype=pd.List(pd.Utf8),
+                    )
+                    .first()
+                    .alias('host_names_list'),
                 ]
             )
 
             # Rename the list columns to their final names (keep as native Lists)
-            group = group.rename({
-                'managed_node_types_list': 'managed_node_types_set',
-                'events_list': 'events',
-                'host_names_list': 'host_names_before_dedup',
-            })
+            group = group.rename(
+                {
+                    'managed_node_types_list': 'managed_node_types_set',
+                    'events_list': 'events',
+                    'host_names_list': 'host_names_before_dedup',
+                }
+            )
         except TypeError as e:
             # Log the error but don't try to fix it inline - let the schema system handle it
             add_span_attributes(current_span, **{'dataframe.group.type_error': str(e)})
@@ -921,7 +951,7 @@ class DataframeJobhostSummaryUsage(Base):
     @traced_method('jobhost_summary.regroup')
     def regroup(self, dataframe):
         """Regroup pre-aggregated dataframe with performance tracking.
-        
+
         TODO: Implement complex type merging to match operations() method functionality.
         Currently using simplified aggregation for JSON strings and sets.
         Should implement proper 'combine_set' and 'combine_json_values' operations.
@@ -942,40 +972,100 @@ class DataframeJobhostSummaryUsage(Base):
 
         # Use proper merging for complex types during rollup aggregation
         from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts, merge_list_arrays
-        
+
         result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
             [
                 # Numeric aggregations
                 pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('host_runs').sum().alias('host_runs'),  # Sum pre-computed host_runs values from rollups
-                
+                pd.col('job_remote_id').count().alias('host_runs'),  # Count job instances per host (number of jobs each host ran)
                 # CRITICAL: Filter null values before min/max aggregation to prevent inconsistent results
                 # This ensures that null values don't interfere with timestamp aggregation
                 pd.col('first_automation').filter(pd.col('first_automation').is_not_null()).min().alias('first_automation'),
                 pd.col('last_automation').filter(pd.col('last_automation').is_not_null()).max().alias('last_automation'),
                 pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
                 pd.col('managed_node_type').min().alias('managed_node_type'),
-                
-                # Complex type aggregations using native types
-                # Facts: Use native Struct merging
-                pd.col('canonical_facts').filter(pd.col('canonical_facts').is_not_null()).first().alias('canonical_facts'),
-                pd.col('facts').filter(pd.col('facts').is_not_null()).first().alias('facts'),
-                
+                # Complex type aggregations - JSON strings (merge values properly)
+                # Facts: JSON strings from previous aggregation, merge using merge_and_stringify_facts
+                pd.col('canonical_facts')
+                .filter(pd.col('canonical_facts').is_not_null())
+                .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                .first()
+                .alias('canonical_facts'),
+                pd.col('facts')
+                .filter(pd.col('facts').is_not_null())
+                .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                .first()
+                .alias('facts'),
                 # Collections: Use native List merging safely
-                pd.col('managed_node_types_set').map_batches(
-                    lambda s: pd.Series([sorted(list(set([str(item) for sublist in s.to_list() if sublist is not None for item in (sublist if isinstance(sublist, list) else [sublist]) if item is not None])))]),
-                    return_dtype=pd.List(pd.Utf8)
-                ).first().alias('managed_node_types_set'),
-                
-                pd.col('events').map_batches(
-                    lambda s: pd.Series([sorted(list(set([str(item) for sublist in s.to_list() if sublist is not None for item in (sublist if isinstance(sublist, list) else [sublist]) if item is not None])))]),
-                    return_dtype=pd.List(pd.Utf8)
-                ).first().alias('events'),
-                
-                pd.col('host_names_before_dedup').map_batches(
-                    lambda s: pd.Series([sorted(list(set([str(item) for sublist in s.to_list() if sublist is not None for item in (sublist if isinstance(sublist, list) else [sublist]) if item is not None])))]),
-                    return_dtype=pd.List(pd.Utf8)
-                ).first().alias('host_names_before_dedup'),
+                pd.col('managed_node_types_set')
+                .map_batches(
+                    lambda s: pd.Series(
+                        [
+                            sorted(
+                                list(
+                                    set(
+                                        [
+                                            str(item)
+                                            for sublist in s.to_list()
+                                            if sublist is not None
+                                            for item in (sublist if isinstance(sublist, list) else [sublist])
+                                            if item is not None
+                                        ]
+                                    )
+                                )
+                            )
+                        ]
+                    ),
+                    return_dtype=pd.List(pd.Utf8),
+                )
+                .first()
+                .alias('managed_node_types_set'),
+                pd.col('events')
+                .map_batches(
+                    lambda s: pd.Series(
+                        [
+                            sorted(
+                                list(
+                                    set(
+                                        [
+                                            str(item)
+                                            for sublist in s.to_list()
+                                            if sublist is not None
+                                            for item in (sublist if isinstance(sublist, list) else [sublist])
+                                            if item is not None
+                                        ]
+                                    )
+                                )
+                            )
+                        ]
+                    ),
+                    return_dtype=pd.List(pd.Utf8),
+                )
+                .first()
+                .alias('events'),
+                pd.col('host_names_before_dedup')
+                .map_batches(
+                    lambda s: pd.Series(
+                        [
+                            sorted(
+                                list(
+                                    set(
+                                        [
+                                            str(item)
+                                            for sublist in s.to_list()
+                                            if sublist is not None
+                                            for item in (sublist if isinstance(sublist, list) else [sublist])
+                                            if item is not None
+                                        ]
+                                    )
+                                )
+                            )
+                        ]
+                    ),
+                    return_dtype=pd.List(pd.Utf8),
+                )
+                .first()
+                .alias('host_names_before_dedup'),
             ]
         )
 
@@ -998,22 +1088,17 @@ class DataframeJobhostSummaryUsage(Base):
 
         return result
 
-
-
-
     def dedup(self, dataframe, hostname_mapping=None, scope_dataframe=None):
         """
         Override dedup method to enrich canonical facts and facts from scope_dataframe
         when experimental deduplication is enabled.
         """
+
         if dataframe is None or len(dataframe) == 0:
             return self.empty()
 
-        if not hostname_mapping:
-            return dataframe
-
         # Enrich direct managed nodes with canonical facts and facts from scope data
-        # when experimental deduplication is enabled
+        # when experimental deduplication is enabled (regardless of hostname mapping)
         experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
 
         if experimental_dedup and scope_dataframe is not None and len(scope_dataframe) > 0:
@@ -1028,67 +1113,293 @@ class DataframeJobhostSummaryUsage(Base):
                     # Create a mapping from scope dataframe using Polars
                     scope_mapping = {}
                     for row in scope_dataframe.iter_rows(named=True):
-                        # Keep facts as lists to match dataframe_schema expectations
-                        canonical_facts_list = row.get('canonical_facts', [])
-                        facts_list = row.get('facts', [])
-                        
-                        scope_mapping[row['host_name']] = {'canonical_facts': canonical_facts_list, 'facts': facts_list}
+                        # Keep facts as JSON strings to match dataframe_schema expectations
+                        canonical_facts_json = row.get('canonical_facts', '{}')
+                        facts_json = row.get('facts', '{}')
+
+                        # Enrichment data ready for mapping
+
+                        scope_mapping[row['host_name']] = {'canonical_facts': canonical_facts_json, 'facts': facts_json}
 
                     # Update canonical_facts and facts for direct managed nodes using native Polars operations
                     # Keep everything in native List format to maintain schema consistency
                     try:
-                        # Create mapping DataFrame with native List types matching dataframe_schema
+                        # Create mapping DataFrame with JSON strings matching dataframe_schema
                         mapping_data = []
                         for host_name, data in scope_mapping.items():
-                            mapping_data.append({
-                                'host_name': host_name, 
-                                'scope_canonical_facts': data.get('canonical_facts', []), 
-                                'scope_facts': data.get('facts', [])
-                            })
+                            mapping_data.append(
+                                {
+                                    'host_name': host_name,
+                                    'scope_canonical_facts': data.get('canonical_facts', '{}'),
+                                    'scope_facts': data.get('facts', '{}'),
+                                }
+                            )
 
                         if mapping_data:
                             scope_mapping_df = pd.DataFrame(mapping_data)
-                            
-                            # Ensure scope mapping dataframe has correct schema
-                            scope_mapping_df = self.apply_complete_schema(
-                                scope_mapping_df, 
-                                schema_type="dataframe", 
-                                operation_context="scope_mapping_enrichment"
-                            )
+
+                            # No schema application needed - working with JSON strings consistently
 
                             # Join with scope mapping and conditionally update based on managed_node_type
                             dataframe = dataframe.join(scope_mapping_df, on='host_name', how='left')
 
-                            # Update canonical_facts for direct managed nodes only using native List operations
-                            dataframe = dataframe.with_columns([
-                                pd.when(pd.col('managed_node_type') == DIRECT)
-                                .then(pd.col('scope_canonical_facts'))
-                                .otherwise(pd.col('canonical_facts'))
-                                .alias('canonical_facts')
-                            ])
+                            # Update canonical_facts for direct managed nodes only using JSON string operations
+                            dataframe = dataframe.with_columns(
+                                [
+                                    pd.when(pd.col('managed_node_type') == DIRECT)
+                                    .then(pd.col('scope_canonical_facts'))
+                                    .otherwise(pd.col('canonical_facts'))
+                                    .alias('canonical_facts')
+                                ]
+                            )
 
-                            # Update facts for direct managed nodes only using native List operations  
-                            dataframe = dataframe.with_columns([
-                                pd.when(pd.col('managed_node_type') == DIRECT)
-                                .then(pd.col('scope_facts'))
-                                .otherwise(pd.col('facts'))
-                                .alias('facts')
-                            ])
+                            # Update facts for direct managed nodes only using JSON string operations
+                            dataframe = dataframe.with_columns(
+                                [pd.when(pd.col('managed_node_type') == DIRECT).then(pd.col('scope_facts')).otherwise(pd.col('facts')).alias('facts')]
+                            )
 
                             # Remove temporary join columns
                             dataframe = dataframe.drop(['scope_canonical_facts', 'scope_facts'])
-                            
+
                             # Apply schema to ensure consistency after join operations
-                            dataframe = self.apply_complete_schema(
-                                dataframe, 
-                                schema_type="dataframe", 
-                                operation_context="after_scope_enrichment"
-                            )
-                            
+                            dataframe = self.apply_complete_schema(dataframe, schema_type='dataframe', operation_context='after_scope_enrichment')
+
                     except Exception as join_error:
-                        # Fallback: skip enrichment if join approach fails  
+                        # Fallback: skip enrichment if join approach fails
                         print(f'Warning: Scope enrichment join failed: {join_error}, skipping enrichment')
                         pass
 
         # Call the parent dedup method to perform the actual deduplication
-        return super().dedup(dataframe, hostname_mapping)
+        # Only proceed with hostname-based deduplication if we have a mapping
+        if hostname_mapping:
+            result = super().dedup(dataframe, hostname_mapping)
+        else:
+            # No hostname mapping, just return the enriched dataframe
+            result = dataframe
+
+        # Additional step for experimental deduplication: merge records with same machine_id
+        # This handles cases where hosts have different job_remote_id but same physical machine
+        if experimental_dedup and result is not None and len(result) > 0:
+            # Parse canonical_facts to extract machine_id for grouping
+            if 'canonical_facts' in result.columns:
+                try:
+                    # Add machine_id and product_serial columns for grouping
+                    def extract_machine_id(canonical_facts_json):
+                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
+                            return None
+                        try:
+                            import json
+
+                            facts_dict = json.loads(canonical_facts_json)
+                            machine_ids = facts_dict.get('ansible_machine_id', [])
+                            if isinstance(machine_ids, list) and machine_ids:
+                                return machine_ids[0]  # Take first machine_id
+                            return None
+                        except:
+                            return None
+
+                    def extract_product_serial(canonical_facts_json):
+                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
+                            return None
+                        try:
+                            import json
+
+                            facts_dict = json.loads(canonical_facts_json)
+                            serials = facts_dict.get('ansible_product_serial', [])
+                            if isinstance(serials, list) and serials:
+                                return serials[0]  # Take first serial
+                            return None
+                        except:
+                            return None
+
+                    result = result.with_columns(
+                        [
+                            result['canonical_facts'].map_elements(extract_machine_id, return_dtype=pd.String).alias('machine_id_for_dedup'),
+                            result['canonical_facts'].map_elements(extract_product_serial, return_dtype=pd.String).alias('product_serial_for_dedup'),
+                        ]
+                    )
+
+                    # Create a composite key for deduplication: machine_id + serial only
+                    result = result.with_columns(
+                        [
+                            (pd.col('machine_id_for_dedup').fill_null('') + '__' + pd.col('product_serial_for_dedup').fill_null('')).alias(
+                                'dedup_composite_key'
+                            )
+                        ]
+                    )
+
+                    machine_id_groups = (
+                        result.filter(result['machine_id_for_dedup'].is_not_null())
+                        .group_by('dedup_composite_key')
+                        .agg([pd.col('host_name').count().alias('count'), pd.col('host_name').first().alias('sample_host')])
+                        .filter(pd.col('count') > 1)
+                    )
+
+                    if len(machine_id_groups) > 0:
+                        # Regroup by machine_id to merge duplicate physical hosts
+                        # Use modified unique index that groups by machine_id instead of job details
+                        from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
+
+                        machine_id_grouped = (
+                            result.filter(result['machine_id_for_dedup'].is_not_null())
+                            .group_by(['dedup_composite_key'])
+                            .agg(
+                                [
+                                    # Numeric aggregations - sum across jobs
+                                    pd.col('task_runs').sum().alias('task_runs'),
+                                    pd.col('host_runs').sum().alias('host_runs'),
+                                    # Timestamp aggregations
+                                    pd.col('first_automation').filter(pd.col('first_automation').is_not_null()).min().alias('first_automation'),
+                                    pd.col('last_automation').filter(pd.col('last_automation').is_not_null()).max().alias('last_automation'),
+                                    pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
+                                    pd.col('managed_node_type').min().alias('managed_node_type'),
+                                    # Take first job_remote_id (doesn't matter which since we're merging)
+                                    pd.col('job_remote_id').first().alias('job_remote_id'),
+                                    pd.col('job_template_name').first().alias('job_template_name'),
+                                    # Aggregate organization information to preserve all unique organizations
+                                    pd.col('organization_name').unique().sort().alias('organizations_list'),
+                                    pd.col('organization_name').first().alias('organization_name'),  # Keep one for schema compatibility
+                                    pd.col('install_uuid').first().alias('install_uuid'),
+                                    # Take first host_name and original_host_name (the merged host will use one of them)
+                                    pd.col('host_name').first().alias('host_name'),
+                                    pd.col('original_host_name').first().alias('original_host_name'),
+                                    # Complex type aggregations - merge canonical facts and facts
+                                    pd.col('canonical_facts')
+                                    .filter(pd.col('canonical_facts').is_not_null())
+                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                                    .first()
+                                    .alias('canonical_facts'),
+                                    pd.col('facts')
+                                    .filter(pd.col('facts').is_not_null())
+                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                                    .first()
+                                    .alias('facts'),
+                                    # Merge collections
+                                    pd.col('managed_node_types_set')
+                                    .map_batches(
+                                        lambda s: pd.Series(
+                                            [
+                                                sorted(
+                                                    list(
+                                                        set(
+                                                            [
+                                                                str(item)
+                                                                for sublist in s.to_list()
+                                                                if sublist is not None
+                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
+                                                                if item is not None
+                                                            ]
+                                                        )
+                                                    )
+                                                )
+                                            ]
+                                        ),
+                                        return_dtype=pd.List(pd.Utf8),
+                                    )
+                                    .first()
+                                    .alias('managed_node_types_set'),
+                                    pd.col('events')
+                                    .map_batches(
+                                        lambda s: pd.Series(
+                                            [
+                                                sorted(
+                                                    list(
+                                                        set(
+                                                            [
+                                                                str(item)
+                                                                for sublist in s.to_list()
+                                                                if sublist is not None
+                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
+                                                                if item is not None
+                                                            ]
+                                                        )
+                                                    )
+                                                )
+                                            ]
+                                        ),
+                                        return_dtype=pd.List(pd.Utf8),
+                                    )
+                                    .first()
+                                    .alias('events'),
+                                    pd.col('host_names_before_dedup')
+                                    .map_batches(
+                                        lambda s: pd.Series(
+                                            [
+                                                sorted(
+                                                    list(
+                                                        set(
+                                                            [
+                                                                str(item)
+                                                                for sublist in s.to_list()
+                                                                if sublist is not None
+                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
+                                                                if item is not None and str(item).strip()
+                                                            ]
+                                                        )
+                                                    )
+                                                )
+                                            ]
+                                        ),
+                                        return_dtype=pd.List(pd.Utf8),
+                                    )
+                                    .first()
+                                    .alias('host_names_before_dedup'),
+                                ]
+                            )
+                        )
+
+                        # Combine the machine_id grouped results with records that don't have machine_id
+                        records_without_machine_id = result.filter(result['machine_id_for_dedup'].is_null()).drop(
+                            ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
+                        )
+
+                        machine_id_grouped = machine_id_grouped.drop('dedup_composite_key')
+
+                        # Ensure both dataframes have the same columns in the same order
+                        all_columns = sorted(set(machine_id_grouped.columns) | set(records_without_machine_id.columns))
+
+                        # Add missing columns to both dataframes
+                        for col in all_columns:
+                            if col not in machine_id_grouped.columns:
+                                # Add missing column with appropriate default value
+                                if col in ['task_runs', 'host_runs', 'job_remote_id']:
+                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit(0).alias(col))
+                                elif col in ['managed_node_types_set', 'events', 'host_names_before_dedup', 'organizations_list']:
+                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit([]).alias(col))
+                                elif col in ['canonical_facts', 'facts']:
+                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit('{}').alias(col))
+                                else:
+                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit(None).alias(col))
+
+                            if col not in records_without_machine_id.columns:
+                                # Add missing column with appropriate default value
+                                if col in ['task_runs', 'host_runs', 'job_remote_id']:
+                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit(0).alias(col))
+                                elif col in ['managed_node_types_set', 'events', 'host_names_before_dedup', 'organizations_list']:
+                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit([]).alias(col))
+                                elif col in ['canonical_facts', 'facts']:
+                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit('{}').alias(col))
+                                else:
+                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit(None).alias(col))
+
+                        # Select columns in the same order
+                        machine_id_grouped = machine_id_grouped.select(all_columns)
+                        records_without_machine_id = records_without_machine_id.select(all_columns)
+
+                        # Concatenate the results
+                        if len(records_without_machine_id) > 0:
+                            result = pd.concat([machine_id_grouped, records_without_machine_id])
+                        else:
+                            result = machine_id_grouped
+
+                    else:
+                        result = result.drop(['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key'])
+
+                except Exception as e:
+                    # Fallback: remove the temporary columns and continue
+                    cols_to_remove = ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
+                    for col in cols_to_remove:
+                        if col in result.columns:
+                            result = result.drop(col)
+
+        return result

@@ -196,12 +196,36 @@ class RollupReader:
                             if dataframe_class:
                                 # Create temporary instance to access load_from_parquet method
                                 df_instance = dataframe_class(extractor=None, month=None, extra_params={})
-                                df = df_instance.load_from_parquet(parquet_path)
+                                if hasattr(df_instance, 'load_from_parquet'):
+                                    print(f'DEBUG ROLLUP READER: Using dataframe class load_from_parquet for {df_name}')
+                                    df = df_instance.load_from_parquet(parquet_path)
+                                else:
+                                    print(f'DEBUG ROLLUP READER: No load_from_parquet method for {df_name}, using fallback')
+                                    import polars as pl
+
+                                    df = pl.read_parquet(parquet_path)
+
+                                    # Apply transformations for specific dataframes
+                                    if df_name == 'DataframeJobhostSummaryUsage':
+                                        # Convert lists back to sets for known set columns (critical for proper aggregation)
+                                        df = self._convert_lists_to_sets(df, df_name)
+                                        # Apply JSON normalization for canonical_facts and facts
+                                        df = self._normalize_dataframe_types(df, df_name)
+                                    elif df_name == 'DataframeInventoryScope':
+                                        # Convert lists back to sets for known set columns (critical for proper aggregation)
+                                        df = self._convert_lists_to_sets(df, df_name)
+                                        # Apply JSON normalization for canonical_facts and facts
+                                        df = self._normalize_dataframe_types(df, df_name)
+                                        # Compute missing serials for rollup data
+                                        df = self._compute_missing_serials(df)
+                                    # For DataframeContentUsage and DataframeCollectionStatus, use raw parquet data
                             else:
+                                print(f'DEBUG ROLLUP READER: No dataframe class found for {df_name}')
                                 # Fallback to direct loading if dataframe class not found
                                 import polars as pl
+
                                 df = pl.read_parquet(parquet_path)
-                                
+
                                 # Only do minimal transformations for specific dataframes
                                 if df_name == 'DataframeJobhostSummaryUsage':
                                     # Convert lists back to sets for known set columns (critical for proper aggregation)
@@ -213,6 +237,8 @@ class RollupReader:
                                     df = self._convert_lists_to_sets(df, df_name)
                                     # Apply JSON normalization for canonical_facts and facts
                                     df = self._normalize_dataframe_types(df, df_name)
+                                    # Compute missing serials for rollup data
+                                    df = self._compute_missing_serials(df)
                                 # For DataframeContentUsage and DataframeCollectionStatus, use raw parquet data
 
                             if merged_dataframes[df_name] is None:
@@ -305,7 +331,7 @@ class RollupReader:
 
     def _convert_lists_to_sets(self, df: pl.DataFrame, dataframe_name: str) -> pl.DataFrame:
         """Convert lists back to sets for known set columns after loading from parquet.
-        
+
         When storing to parquet, sets are converted to sorted lists. This method converts them back.
         """
         # Define which columns should be sets for each dataframe type
@@ -315,9 +341,9 @@ class RollupReader:
             'DataframeContentUsage': ['playbooks', 'organizations'],
             'DataframeCollectionStatus': [],  # No set columns in collection status
         }
-        
+
         set_columns = set_columns_map.get(dataframe_name, [])
-        
+
         for col in set_columns:
             if col in df.columns:
                 # Convert lists/arrays to sets, handling None values and numpy arrays properly
@@ -332,11 +358,9 @@ class RollupReader:
                         return set(x)
                     else:
                         return x
-                
-                df = df.with_columns(
-                    df[col].map_elements(convert_to_set, return_dtype=pl.Object).alias(col)
-                )
-        
+
+                df = df.with_columns(df[col].map_elements(convert_to_set, return_dtype=pl.Object).alias(col))
+
         return df
 
     def _normalize_dataframe_types(self, df: pl.DataFrame, dataframe_name: str) -> pl.DataFrame:
@@ -352,7 +376,7 @@ class RollupReader:
             'DataframeContentUsage': [],
             'DataframeCollectionStatus': [],  # No JSON columns in collection status
         }
-        
+
         json_columns = json_columns_map.get(dataframe_name, [])
 
         # Handle JSON fields that were serialized for parquet storage - only for specified columns
@@ -369,6 +393,7 @@ class RollupReader:
                     try:
                         # Try to parse as JSON using Polars
                         import json
+
                         def parse_json(x):
                             if x is not None and x != '':
                                 try:
@@ -376,16 +401,15 @@ class RollupReader:
                                 except (json.JSONDecodeError, TypeError):
                                     return None
                             return None
-                        
-                        df_normalized = df_normalized.with_columns(
-                            df_normalized[col].map_elements(parse_json, return_dtype=pl.Object).alias(col)
-                        )
+
+                        df_normalized = df_normalized.with_columns(df_normalized[col].map_elements(parse_json, return_dtype=pl.Object).alias(col))
 
                         # Special handling for canonical_facts and facts columns
                         if col in ['canonical_facts', 'facts']:
+
                             def normalize_facts(x):
                                 return self._normalize_canonical_facts_dict(x) if x is not None else None
-                            
+
                             df_normalized = df_normalized.with_columns(
                                 df_normalized[col].map_elements(normalize_facts, return_dtype=pl.Object).alias(col)
                             )
@@ -402,21 +426,19 @@ class RollupReader:
                     sample_val = non_null_values[0]
                 else:
                     sample_val = None
-                
+
                 if isinstance(sample_val, np.ndarray):
                     # Convert numpy arrays to lists for Excel compatibility
                     def convert_numpy(x):
                         return x.tolist() if x is not None and hasattr(x, 'tolist') else x
-                    df_normalized = df_normalized.with_columns(
-                        df_normalized[col].map_elements(convert_numpy, return_dtype=pl.Object).alias(col)
-                    )
+
+                    df_normalized = df_normalized.with_columns(df_normalized[col].map_elements(convert_numpy, return_dtype=pl.Object).alias(col))
                 elif hasattr(sample_val, '__iter__') and not isinstance(sample_val, (str, bytes, dict)):
                     # Convert other complex iterables to simple types (but not strings or dicts)
                     def convert_iterable(x):
                         return list(x) if x is not None and hasattr(x, '__iter__') and not isinstance(x, (str, bytes, dict)) else x
-                    df_normalized = df_normalized.with_columns(
-                        df_normalized[col].map_elements(convert_iterable, return_dtype=pl.Object).alias(col)
-                    )
+
+                    df_normalized = df_normalized.with_columns(df_normalized[col].map_elements(convert_iterable, return_dtype=pl.Object).alias(col))
 
         return df_normalized
 
@@ -660,3 +682,64 @@ class RollupReader:
         # Use dataframe class merge method to properly combine rollups from different days
         # This preserves aggregated data structures and handles complex merging logic
         return df_instance.merge(existing_df, new_df)
+
+    def _compute_missing_serials(self, df):
+        """Compute missing serials for DataframeInventoryScope rollup data.
+
+        This method checks if serials are missing (empty lists) and recomputes them
+        from canonical_facts if available. This is needed because older rollup files
+        may have been created before serial computation was implemented.
+
+        Args:
+            df: Polars DataFrame with potential missing serials
+
+        Returns:
+            DataFrame with computed serials
+        """
+        import polars as pl
+
+        if df is None or len(df) == 0:
+            return df
+
+        # Check if we have the required columns
+        if 'canonical_facts' not in df.columns or 'serials' not in df.columns:
+            return df
+
+        # Check if any serials are missing (empty lists)
+        has_empty_serials = False
+        for row in df.iter_rows(named=True):
+            serials = row.get('serials')
+            if serials is None or (isinstance(serials, list) and len(serials) == 0):
+                has_empty_serials = True
+                break
+
+        if not has_empty_serials:
+            return df
+
+        print('DEBUG ROLLUP READER: Found empty serials in rollup data, computing them...')
+
+        # Import compute_serial function
+        try:
+            from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope import compute_serial
+
+            # Recompute serials for all rows
+            df = df.with_columns(
+                [
+                    df['canonical_facts']
+                    .map_elements(lambda x: compute_serial({'canonical_facts': x}) if x else None, return_dtype=pl.Utf8)
+                    .alias('serial')
+                ]
+            )
+
+            # Convert serial back to serials list format to match expected schema
+            df = df.with_columns([df['serial'].map_elements(lambda x: [x] if x is not None else [], return_dtype=pl.List(pl.Utf8)).alias('serials')])
+
+            # Remove the temporary serial column
+            df = df.drop('serial')
+
+            print(f'DEBUG ROLLUP READER: Recomputed serials for {len(df)} records')
+
+        except Exception as e:
+            print(f'DEBUG ROLLUP READER: Failed to compute serials: {e}')
+
+        return df

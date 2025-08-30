@@ -62,61 +62,35 @@ class DataframeContentUsage(Base):
     @staticmethod
     def collector_schema() -> pa.Schema:
         """Define PyArrow schema for raw CSV collector data validation.
-        
+
         This schema validates raw CSV data from the main_jobevent table,
         used for content usage tracking.
-        
+
         Returns:
             PyArrow schema for main_jobevent CSV data validation
         """
-        return pa.schema([
-            # Core identification columns
-            pa.field("host_name", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            
-            # Task action data (for processing into module/collection names)
-            pa.field("task_action", pa.string()),
-            pa.field("resolved_action", pa.string()),
-            pa.field("resolved_role", pa.string()), 
-            pa.field("role", pa.string()),
-            
-            # Performance data
-            pa.field("duration", pa.float64()),
-        ])
+        return pa.schema(
+            [
+                # Core identification columns
+                pa.field('host_name', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                # Task action data (for processing into module/collection names)
+                pa.field('task_action', pa.string()),
+                pa.field('resolved_action', pa.string()),
+                pa.field('resolved_role', pa.string()),
+                pa.field('role', pa.string()),
+                # Performance data
+                pa.field('duration', pa.float64()),
+            ]
+        )
 
     @staticmethod
     def collector_dataframe_schema() -> Dict[str, str]:
         """Define Polars dataframe schema for processed CSV data (before grouping).
-        
+
         This schema is applied after CSV processing but before the group() method.
         All columns are in their final types ready for aggregation operations.
-        
-        Returns:
-            Dictionary mapping column names to Polars dtypes as strings
-        """
-        return {
-            # Index columns (unique identifiers)
-            'host_name': 'String',
-            'module_name': 'String',
-            'collection_name': 'String', 
-            'role_name': 'String',
-            'install_uuid': 'String',
-            'job_remote_id': 'Int64',
-            
-            # Data columns
-            'task_runs': 'Int64',
-            'duration': 'Float64',
-        }
 
-    @staticmethod
-    def dataframe_schema() -> Dict[str, str]:
-        """Define Polars dataframe schema for working dataframes (after grouping).
-        
-        This schema is used for:
-        - Data after group() aggregation
-        - Data when merging multiple rollups  
-        - Data in report generation
-        
         Returns:
             Dictionary mapping column names to Polars dtypes as strings
         """
@@ -125,10 +99,34 @@ class DataframeContentUsage(Base):
             'host_name': 'String',
             'module_name': 'String',
             'collection_name': 'String',
-            'role_name': 'String', 
+            'role_name': 'String',
             'install_uuid': 'String',
             'job_remote_id': 'Int64',
-            
+            # Data columns
+            'task_runs': 'Int64',
+            'duration': 'Float64',
+        }
+
+    @staticmethod
+    def dataframe_schema() -> Dict[str, str]:
+        """Define Polars dataframe schema for working dataframes (after grouping).
+
+        This schema is used for:
+        - Data after group() aggregation
+        - Data when merging multiple rollups
+        - Data in report generation
+
+        Returns:
+            Dictionary mapping column names to Polars dtypes as strings
+        """
+        return {
+            # Index columns (unique identifiers)
+            'host_name': 'String',
+            'module_name': 'String',
+            'collection_name': 'String',
+            'role_name': 'String',
+            'install_uuid': 'String',
+            'job_remote_id': 'Int64',
             # Aggregated data columns
             'task_runs': 'Int64',
             'duration': 'Float64',
@@ -137,34 +135,35 @@ class DataframeContentUsage(Base):
     @staticmethod
     def parquet_schema() -> pa.Schema:
         """Define PyArrow schema for aggregated rollup data validation.
-        
+
         This schema is used for validating aggregated content usage data during
         rollup merging operations. It includes only the final aggregated columns
         after group_by operations.
-        
+
         Returns:
             PyArrow schema for rollup data validation
         """
-        return pa.schema([
-            # Index columns (unique identifiers)
-            pa.field("host_name", pa.string()),
-            pa.field("module_name", pa.string()),
-            pa.field("collection_name", pa.string()),
-            pa.field("role_name", pa.string()),
-            pa.field("install_uuid", pa.string()),
-            pa.field("job_remote_id", pa.int64()),
-            
-            # Aggregated data columns
-            pa.field("task_runs", pa.int64()),
-            pa.field("duration", pa.float64()),
-        ])
+        return pa.schema(
+            [
+                # Index columns (unique identifiers)
+                pa.field('host_name', pa.string()),
+                pa.field('module_name', pa.string()),
+                pa.field('collection_name', pa.string()),
+                pa.field('role_name', pa.string()),
+                pa.field('install_uuid', pa.string()),
+                pa.field('job_remote_id', pa.int64()),
+                # Aggregated data columns
+                pa.field('task_runs', pa.int64()),
+                pa.field('duration', pa.float64()),
+            ]
+        )
 
     def get_collector_default_values(self) -> Dict[str, Any]:
         """Get custom default values for collector schema columns.
-        
+
         These defaults override the standard type-based defaults for domain-specific
         requirements for content usage processing.
-        
+
         Returns:
             Dictionary mapping column names to custom default values
         """
@@ -185,7 +184,7 @@ class DataframeContentUsage(Base):
 
     def get_rollup_default_values(self) -> Dict[str, Any]:
         """Get custom default values for rollup schema columns.
-        
+
         Returns:
             Dictionary mapping column names to custom default values
         """
@@ -203,10 +202,10 @@ class DataframeContentUsage(Base):
     @staticmethod
     def collector_dataframe_validation_schema() -> Dict[str, Dict[str, Any]]:
         """Define validation rules for collector dataframe columns.
-        
+
         This schema specifies which columns are required, which can be null,
         and validation rules extracted from the old inline validation logic.
-        
+
         Returns:
             Dictionary mapping column names to validation rule dictionaries
         """
@@ -215,12 +214,10 @@ class DataframeContentUsage(Base):
             'host_name': {'required': True, 'allow_null': False},
             'module_name': {'required': True, 'allow_null': False},  # Renamed from task_action
             'job_remote_id': {'required': True, 'allow_null': False, 'min_value': 1},
-            
             # Optional columns that can be null
             'collection_name': {'required': False, 'allow_null': True},
             'role_name': {'required': False, 'allow_null': True},
             'install_uuid': {'required': False, 'allow_null': True},
-            
             # Numeric columns with range validation
             'duration': {'required': True, 'allow_null': True, 'min_value': 0.0},
             'task_runs': {'required': True, 'allow_null': False, 'min_value': 1},  # Each record represents at least one task
@@ -259,10 +256,10 @@ class DataframeContentUsage(Base):
     @staticmethod
     def operations():
         """Define how to merge rollup data when combining multiple rollup files.
-        
+
         This is used by the summarize_merged_dataframes() method in the base class
         when resolving conflicts from join operations during rollup merging.
-        
+
         Returns:
             dict: Mapping of column_name -> operation for resolving merge conflicts
         """
@@ -284,7 +281,7 @@ class DataframeContentUsage(Base):
     # ========================================
     def _process_batch_data_with_schema(self, batch_data, current_span):
         """Process batch data and apply collector_dataframe_schema (BEFORE grouping).
-        
+
         Override base class method to avoid double schema application since
         processing already applies the schema.
         """
@@ -296,13 +293,13 @@ class DataframeContentUsage(Base):
 
     def _process_batch_data(self, batch_data, current_span):
         """Process individual batch data using centralized schema-driven approach.
-        
+
         This method uses the new validation system:
         1. CSV validation using collector_schema
-        2. Business logic transformations (module/role extraction) 
+        2. Business logic transformations (module/role extraction)
         3. Schema application with automatic validation via collector_dataframe_validation_schema
-        
-        All validation, type casting, and column completion is handled by the 
+
+        All validation, type casting, and column completion is handled by the
         centralized schema system in the base class.
         """
         # Get main_jobevent data from this batch
@@ -312,57 +309,54 @@ class DataframeContentUsage(Base):
 
         # Step 1: Validate CSV data against collector schema
         events = self.validate_collector_data(
-            events,
-            strict_columns=['host_name', 'job_remote_id'], 
-            default_values=self.get_collector_default_values()
+            events, strict_columns=['host_name', 'job_remote_id'], default_values=self.get_collector_default_values()
         )
-        
+
         # Step 2: Add core metadata columns
         events = events.with_columns(pd.lit(batch_data['config']['install_uuid']).alias('install_uuid'))
-        
+
         # Step 3: Apply business logic transformations
         events = self._process_content_transformations(events)
-        
+
         # Step 4: Apply complete collector_dataframe schema (includes validation)
-        events = self.apply_complete_schema(events, schema_type="collector_dataframe", operation_context="after_content_transformations")
+        events = self.apply_complete_schema(events, schema_type='collector_dataframe', operation_context='after_content_transformations')
 
         return events
 
     def _process_content_transformations(self, events):
         """Apply business logic transformations for content usage processing."""
         # If resolved_action and resolved_role are not there, fill them with task_action and role
-        events = events.with_columns([
-            events['resolved_action'].fill_null(events['task_action']).alias('task_action'),
-            events['resolved_role'].fill_null(events['role']).alias('role'),
-        ])
+        events = events.with_columns(
+            [
+                events['resolved_action'].fill_null(events['task_action']).alias('task_action'),
+                events['resolved_role'].fill_null(events['role']).alias('role'),
+            ]
+        )
 
         # Extract role names and collection names using regex
-        events = events.with_columns(
-            events['role'].map_elements(lambda x: self.extract_role_name(x), return_dtype=pd.Utf8).alias('role')
-        )
+        events = events.with_columns(events['role'].map_elements(lambda x: self.extract_role_name(x), return_dtype=pd.Utf8).alias('role'))
 
         # Rename columns to match reality - they are processed names, not raw columns anymore
         events = events.rename({'task_action': 'module_name', 'role': 'role_name'})
 
         # Extract collection names from module names
-        events = events.with_columns(
-            events['module_name'].map_elements(self.extract_collection_name, return_dtype=pd.Utf8).alias('collection_name')
-        )
+        events = events.with_columns(events['module_name'].map_elements(self.extract_collection_name, return_dtype=pd.Utf8).alias('collection_name'))
 
         # Filter out records with missing module names (required for valid content usage records)
         events = events.filter(events['module_name'].is_not_null())
 
         # Set human readable values for missing role and collection names
-        events = events.with_columns([
-            events['role_name'].fill_null('No role used').alias('role_name'),
-            events['collection_name'].fill_null('No collection used').alias('collection_name'),
-        ])
+        events = events.with_columns(
+            [
+                events['role_name'].fill_null('No role used').alias('role_name'),
+                events['collection_name'].fill_null('No collection used').alias('collection_name'),
+            ]
+        )
 
         # Add task_runs column (each record represents one task)
         events = events.with_columns(pd.lit(1).alias('task_runs'))
 
         return events
-
 
     # ========================================
     # AGGREGATION METHODS
@@ -386,10 +380,12 @@ class DataframeContentUsage(Base):
         )
 
         # Use proper aggregation based on initial_aggregations() method
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg([
-            pd.col('module_name').count().alias('task_runs'),  # Count tasks (each row represents one task)
-            pd.col('duration').sum().alias('duration'),  # Sum duration across duplicate records
-        ])
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
+            [
+                pd.col('module_name').count().alias('task_runs'),  # Count tasks (each row represents one task)
+                pd.col('duration').sum().alias('duration'),  # Sum duration across duplicate records
+            ]
+        )
 
         # Duration is null in older versions of Controller - handle with schema defaults
         result = result.with_columns(result['duration'].fill_null(0).alias('duration'))
@@ -431,10 +427,12 @@ class DataframeContentUsage(Base):
             },
         )
 
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg([
-            pd.col('task_runs').sum().alias('task_runs'),
-            pd.col('duration').sum().alias('duration'),
-        ])
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
+            [
+                pd.col('task_runs').sum().alias('task_runs'),
+                pd.col('duration').sum().alias('duration'),
+            ]
+        )
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0
@@ -491,4 +489,3 @@ class DataframeContentUsage(Base):
             return f'{standalone_role.groups()[0]}.{standalone_role.groups()[1]}'
         else:
             return None
-

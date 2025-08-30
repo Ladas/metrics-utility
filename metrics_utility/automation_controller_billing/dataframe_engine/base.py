@@ -405,187 +405,189 @@ def combine_json_values(val1: Union[Dict[str, Any], None], val2: Union[Dict[str,
 # These functions implement Stage 3 from docs/rollups_data_flow.md:
 # "Group-by aggregation within single CSV batch using native Polars types"
 
+
 def merge_json_lists_to_dict(json_list: List[str], column_name: str = 'unknown') -> str:
     """Stage 3: Convert list of JSON strings to merged dictionary with arrays as values.
-    
+
     This implements the core aggregation logic for Stage 3 (Initial Aggregation/Group Method)
     where individual JSON objects from CSV records are combined into a single JSON object
     with arrays as values.
-    
+
     **Stage 3 Data Flow Example:**
     Input Data (from CSV records):
         canonical_facts column contains:
-        - Record 1: '{"os": "linux", "arch": "x86_64"}'  
+        - Record 1: '{"os": "linux", "arch": "x86_64"}'
         - Record 2: '{"os": "ubuntu", "env": "prod"}'
-        
+
     **Stage 3 Aggregation Result:**
         '{"os": ["linux", "ubuntu"], "arch": ["x86_64"], "env": ["prod"]}'
-    
+
     Args:
         json_list: List of JSON strings from group aggregation (e.g., ['{"os": "linux"}', '{"os": "ubuntu"}'])
         column_name: Name of the column being processed (for debugging)
-        
+
     Returns:
         JSON string with merged values as arrays: '{"os": ["linux", "ubuntu"]}'
-        
+
     Note:
         This is used in dataframe_engine group() methods for 'combine_json_values' aggregations.
         Filters out null values and 'NA' values when combining to ensure clean data.
     """
     import json
-    
-    print(f"!!!!! merge_json_lists_to_dict called for {column_name} with {len(json_list) if json_list else 0} items !!!!!") 
-    
+
+    print(f'!!!!! merge_json_lists_to_dict called for {column_name} with {len(json_list) if json_list else 0} items !!!!!')
+
     if json_list is None or not json_list:
-        return "{}"
-        
+        return '{}'
+
     merged_dict = {}
-    
+
     # Process each JSON string in the list
     for i, json_str in enumerate(json_list):
         if json_str is None or json_str == '':
             continue
-            
+
         try:
             parsed = json.loads(json_str)
             if isinstance(parsed, dict):
                 # Filter out null values and 'NA' values when combining
                 clean_dict = {k: v for k, v in parsed.items() if v is not None and v != 'null' and v != 'NA'}
-                
+
                 if clean_dict:  # Only merge if there are valid values
                     merged_dict = combine_json_values(merged_dict, clean_dict)
-                    
+
         except (json.JSONDecodeError, TypeError) as e:
-            print(f"DEBUG: {column_name} JSON decode error for item {i}: {e}")
+            print(f'DEBUG: {column_name} JSON decode error for item {i}: {e}')
             continue
-    
-    # Convert sets to sorted lists before JSON serialization  
+
+    # Convert sets to sorted lists before JSON serialization
     for key in merged_dict:
         if isinstance(merged_dict[key], set):
             merged_dict[key] = sorted(list(merged_dict[key]))
-    
+
     result = json.dumps(merged_dict)
-    print(f"DEBUG: {column_name} Stage 3 result: {result}")
+    print(f'DEBUG: {column_name} Stage 3 result: {result}')
     return result
 
 
 # ========================================
-# STAGE 4: ROLLUP AGGREGATION (REGROUP METHOD) - EXTRACTED AGGREGATION FUNCTIONS  
+# STAGE 4: ROLLUP AGGREGATION (REGROUP METHOD) - EXTRACTED AGGREGATION FUNCTIONS
 # ========================================
 # These functions implement Stage 4 from docs/rollups_data_flow.md:
 # "Cross-file rollup merging with native type operations for combining pre-aggregated data"
 
+
 def merge_native_dicts(series: List[str], column_name: str = 'unknown') -> str:
     """Stage 4: Merge multiple dict JSON strings that already contain arrays as values.
-    
-    This implements Stage 4 (Rollup Aggregation/Regroup Method) where pre-aggregated 
+
+    This implements Stage 4 (Rollup Aggregation/Regroup Method) where pre-aggregated
     JSON objects from different batches/files are merged. The input objects already
     contain arrays as values from Stage 3 processing.
-    
+
     **Stage 4 Data Flow Example:**
     Input Data (from multiple Stage 3 results):
         canonical_facts column contains:
         - Batch 1: '{"os": ["linux", "ubuntu"], "arch": ["x86_64"]}'
         - Batch 2: '{"os": ["centos"], "env": ["prod", "dev"]}'
-        
+
     **Stage 4 Aggregation Result:**
         '{"os": ["centos", "linux", "ubuntu"], "arch": ["x86_64"], "env": ["dev", "prod"]}'
-    
+
     Args:
         series: List of JSON strings where each already contains arrays as values
         column_name: Name of the column being processed (for debugging)
-        
+
     Returns:
         JSON string with merged and deduplicated arrays, sorted for consistency
-        
+
     Note:
         This is used in dataframe_engine regroup() methods for combining rollups.
         Handles both list and non-list values, converting single values to arrays.
     """
     import json
-    
-    print(f"!!!!! merge_native_dicts called for {column_name} with {len(series) if series else 0} items !!!!!")
-    
+
+    print(f'!!!!! merge_native_dicts called for {column_name} with {len(series) if series else 0} items !!!!!')
+
     if series is None or not series:
-        return "{}"
-        
+        return '{}'
+
     merged_dict = {}
-    
+
     for i, json_str in enumerate(series):
         if json_str is None or json_str == '':
             continue
-            
+
         try:
             parsed = json.loads(json_str)
             if isinstance(parsed, dict):
                 for key, values in parsed.items():
                     if key not in merged_dict:
                         merged_dict[key] = []
-                    
+
                     # Handle both list and non-list values
                     if isinstance(values, list):
                         merged_dict[key].extend(values)
                     else:
                         merged_dict[key].append(values)
-                        
+
         except (json.JSONDecodeError, TypeError) as e:
-            print(f"DEBUG: {column_name} JSON decode error for item {i}: {e}")
+            print(f'DEBUG: {column_name} JSON decode error for item {i}: {e}')
             continue
-    
+
     # Remove duplicates and sort for consistency
     for key in merged_dict:
         filtered = [str(x) for x in merged_dict[key] if x is not None and x != 'null' and x != 'NA']
         merged_dict[key] = sorted(list(set(filtered)))
-    
+
     result = json.dumps(merged_dict)
-    print(f"DEBUG: {column_name} Stage 4 result: {result}")
+    print(f'DEBUG: {column_name} Stage 4 result: {result}')
     return result
 
 
 def merge_native_lists(series: List[List[str]], column_name: str = 'unknown') -> List[str]:
     """Stage 4: Merge multiple List columns into single List with unique values.
-    
+
     This implements Stage 4 (Rollup Aggregation/Regroup Method) for native List type
     columns like organizations, inventories, serials. Combines lists from multiple
     batches and removes duplicates.
-    
+
     **Stage 4 Data Flow Example:**
     Input Data (from multiple batches):
         organizations column contains:
         - Batch 1: ["Default", "Test Org 1"]
-        - Batch 2: ["Test Org 1", "Test Org 2"] 
-        
+        - Batch 2: ["Test Org 1", "Test Org 2"]
+
     **Stage 4 Aggregation Result:**
         ["Default", "Test Org 1", "Test Org 2"]
-    
+
     Args:
         series: List of List values from different batches
         column_name: Name of the column being processed (for debugging)
-        
+
     Returns:
         Merged list with unique values, sorted for consistency
-        
+
     Note:
         This is used in dataframe_engine regroup() methods for List type columns.
         Handles both list and single value inputs gracefully.
     """
-    print(f"!!!!! merge_native_lists called for {column_name} with {len(series) if series else 0} items !!!!!")
-    
+    print(f'!!!!! merge_native_lists called for {column_name} with {len(series) if series else 0} items !!!!!')
+
     if series is None or not series:
         return []
-        
+
     all_values = []
     for lst in series:
         if lst is not None and isinstance(lst, list):
             all_values.extend(lst)
         elif lst is not None:
             all_values.append(lst)
-    
+
     # Remove duplicates while preserving order, filter out nulls
     unique_values = list(set([str(v) for v in all_values if v is not None and v != 'null' and v != 'NA']))
     result = sorted(unique_values)
-    
-    print(f"DEBUG: {column_name} Stage 4 list result: {result}")
+
+    print(f'DEBUG: {column_name} Stage 4 list result: {result}')
     return result
 
 
@@ -652,9 +654,21 @@ def validate_with_schema(
             # Type casting with validation
             try:
                 if pa.types.is_integer(expected_type):
-                    df = df.with_columns(df[col_name].cast(pd.Int64, ).alias(col_name))
+                    df = df.with_columns(
+                        df[col_name]
+                        .cast(
+                            pd.Int64,
+                        )
+                        .alias(col_name)
+                    )
                 elif pa.types.is_floating(expected_type):
-                    df = df.with_columns(df[col_name].cast(pd.Float64, ).alias(col_name))
+                    df = df.with_columns(
+                        df[col_name]
+                        .cast(
+                            pd.Float64,
+                        )
+                        .alias(col_name)
+                    )
                 elif pa.types.is_string(expected_type):
                     df = df.with_columns(df[col_name].cast(str).alias(col_name))
                 elif pa.types.is_timestamp(expected_type):
@@ -771,6 +785,29 @@ def convert_json_to_list_pairs(json_str):
             return []  # CRITICAL: Always return empty list, never [null]
     except (json.JSONDecodeError, TypeError):
         return []  # CRITICAL: Always return empty list, never [null]
+
+
+def convert_list_pairs_to_json_string(list_pairs):
+    """Convert List pairs format to JSON string format.
+
+    Args:
+        list_pairs: List in format [['key1', ['value1', 'value2']], ['key2', ['value3']]]
+
+    Returns:
+        JSON string representation of the data as a dictionary
+    """
+    if not list_pairs or not isinstance(list_pairs, list):
+        return '{}'
+
+    try:
+        # Convert to dictionary first
+        result_dict = convert_list_pairs_to_dict(list_pairs)
+        # Convert to JSON string
+        import json
+
+        return json.dumps(result_dict)
+    except Exception:
+        return '{}'
 
 
 def convert_list_pairs_to_dict(list_pairs):
@@ -1339,7 +1376,7 @@ class Base:
             current_span,
             **{
                 'dataframe.cast.input_record_count': record_count,
-                'dataframe.cast.type_count': len(types),
+                'dataframe.cast.type_count': len(types) if types is not None else 0,
                 'dataframe.cast.has_composite_index': len(self.unique_index_columns()) > 1,
             },
         )
@@ -1349,6 +1386,10 @@ class Base:
         # Handle NA/NaN values before casting to avoid "Cannot convert non-finite values (NA or inf) to integer" error
         # Use Polars clone and casting operations
         result = df.clone()
+
+        # Handle None types gracefully
+        if types is None:
+            types = {}
 
         # Polars type casting approach
         for col, col_type in types.items():
@@ -1382,8 +1423,28 @@ class Base:
                         logger.warning(f'Failed to convert column {col} to datetime: {e}. Converting to string instead.')
                         result = result.with_columns(result[col].cast(str).alias(col))
                 else:
-                    # For other types (str, object, etc.), use standard astype
-                    result = result.with_columns(result[col].cast(col_type).alias(col))
+                    # For other types (str, object, etc.), use standard astype with special handling for List to String conversion
+                    try:
+                        # Special handling for canonical_facts and facts: convert List pairs to JSON strings
+                        if col in ['canonical_facts', 'facts'] and col_type in [str, 'str', 'String', pd.Utf8]:
+                            # Check if this is a List column that needs conversion to String
+                            if result[col].dtype.base_type() == pd.List:
+                                print(f'Converting {col} from List format to JSON string format')
+                                # Convert List pairs to JSON strings using existing conversion function
+                                result = result.with_columns(
+                                    result[col]
+                                    .map_elements(lambda x: convert_list_pairs_to_json_string(x) if x is not None else '{}', return_dtype=pd.Utf8)
+                                    .alias(col)
+                                )
+                            else:
+                                # Standard string casting
+                                result = result.with_columns(result[col].cast(col_type).alias(col))
+                        else:
+                            # Standard casting for other columns
+                            result = result.with_columns(result[col].cast(col_type).alias(col))
+                    except Exception as e:
+                        print(f'Failed to cast {col} to {col_type}: {e}. Continuing with original type.')
+                        # Continue with original type if casting fails
 
         cast_duration = time.time() - start_time
         add_span_attributes(
@@ -1433,13 +1494,13 @@ class Base:
 
     def empty(self):
         """Create an empty DataFrame with proper schema types.
-        
+
         This ensures that empty DataFrames have the same schema as DataFrames with data,
         preventing type mismatches during merge operations.
         """
         columns = self.unique_index_columns() + self.data_columns()
         df = pd.DataFrame({col: [] for col in columns})
-        
+
         # Apply the complete dataframe schema to ensure consistent types
         # This prevents List vs String type mismatches during merges
         return self.apply_dataframe_schema_complete(df)
@@ -1469,7 +1530,7 @@ class Base:
                 current_span, **{'dataframe.merge.operation': 'return_new_group', 'dataframe.merge.duration_seconds': time.time() - start_time}
             )
             return new_group
-            
+
         if new_group is None or len(new_group) == 0:
             add_span_attributes(
                 current_span, **{'dataframe.merge.operation': 'return_rollup', 'dataframe.merge.duration_seconds': time.time() - start_time}
@@ -1496,7 +1557,6 @@ class Base:
 
         # CRITICAL: Ensure schema compatibility before concat to prevent type mismatch errors
         rollup_aligned, new_group_aligned = self._align_schemas_for_concat(rollup, new_group)
-
 
         # Perform the concat operation - much simpler and more reliable than join
         import polars as pl
@@ -1798,8 +1858,20 @@ class Base:
                             # Fallback to direct cast
                             target_type = pd.Datetime('us')  # Use microsecond precision
                             try:
-                                rollup = rollup.with_columns(rollup[col].cast(target_type, ).alias(col))
-                                new_group = new_group.with_columns(new_group[col].cast(target_type, ).alias(col))
+                                rollup = rollup.with_columns(
+                                    rollup[col]
+                                    .cast(
+                                        target_type,
+                                    )
+                                    .alias(col)
+                                )
+                                new_group = new_group.with_columns(
+                                    new_group[col]
+                                    .cast(
+                                        target_type,
+                                    )
+                                    .alias(col)
+                                )
                             except Exception as e2:
                                 pass  # Continue with processing other columns
                         continue  # Skip the regular casting since we handled datetime specially
@@ -1807,20 +1879,56 @@ class Base:
                         target_type = pd.Utf8  # Default fallback
 
                     try:
-                        rollup = rollup.with_columns(rollup[col].cast(target_type, ).alias(col))
-                        new_group = new_group.with_columns(new_group[col].cast(target_type, ).alias(col))
+                        rollup = rollup.with_columns(
+                            rollup[col]
+                            .cast(
+                                target_type,
+                            )
+                            .alias(col)
+                        )
+                        new_group = new_group.with_columns(
+                            new_group[col]
+                            .cast(
+                                target_type,
+                            )
+                            .alias(col)
+                        )
                     except Exception as e:
                         # Fallback to string
                         try:
-                            rollup = rollup.with_columns(rollup[col].cast(pd.Utf8, ).alias(col))
-                            new_group = new_group.with_columns(new_group[col].cast(pd.Utf8, ).alias(col))
+                            rollup = rollup.with_columns(
+                                rollup[col]
+                                .cast(
+                                    pd.Utf8,
+                                )
+                                .alias(col)
+                            )
+                            new_group = new_group.with_columns(
+                                new_group[col]
+                                .cast(
+                                    pd.Utf8,
+                                )
+                                .alias(col)
+                            )
                         except Exception as fallback_e:
                             pass  # Continue with processing other columns
                 else:
                     # Column not in schema, use original string fallback
                     try:
-                        rollup = rollup.with_columns(rollup[col].cast(pd.Utf8, ).alias(col))
-                        new_group = new_group.with_columns(new_group[col].cast(pd.Utf8, ).alias(col))
+                        rollup = rollup.with_columns(
+                            rollup[col]
+                            .cast(
+                                pd.Utf8,
+                            )
+                            .alias(col)
+                        )
+                        new_group = new_group.with_columns(
+                            new_group[col]
+                            .cast(
+                                pd.Utf8,
+                            )
+                            .alias(col)
+                        )
                     except Exception as e:
                         pass  # Continue with processing other columns
 
@@ -1918,13 +2026,17 @@ class Base:
 
                             # Strategy 1: Use list.eval to handle [null] -> [] conversion
                             # This properly handles the nested list structure without map_elements confusion
+                            # Safe list cleaning that handles all edge cases
                             df = df.with_columns(
                                 [
                                     pd.when(df[col_name].is_null())
                                     .then(pd.lit([], dtype=pd.List(pd.Utf8)))
-                                    .when(df[col_name].list.len() == 1)
+                                    .when(df[col_name].list.len() == 0)
+                                    .then(pd.lit([], dtype=pd.List(pd.Utf8)))
+                                    .when(df[col_name].list.len() >= 1)
                                     .then(
-                                        pd.when(df[col_name].list.get(0).is_null()).then(pd.lit([], dtype=pd.List(pd.Utf8))).otherwise(df[col_name])
+                                        # Try to access first element safely
+                                        pd.when(df[col_name].list.first().is_null()).then(pd.lit([], dtype=pd.List(pd.Utf8))).otherwise(df[col_name])
                                     )
                                     .otherwise(df[col_name])
                                     .alias(col_name)
@@ -1970,13 +2082,23 @@ class Base:
                                 )
                                 # Use explicit format that we know works from testing
                                 df = df_cleaned.with_columns(
-                                    df_cleaned[col_name + '_clean'].str.to_datetime(format='%Y-%m-%d %H:%M:%S%.f', ).alias(col_name)
+                                    df_cleaned[col_name + '_clean']
+                                    .str.to_datetime(
+                                        format='%Y-%m-%d %H:%M:%S%.f',
+                                    )
+                                    .alias(col_name)
                                 ).drop(col_name + '_clean')
                                 continue
                             except Exception as e2:
                                 try:
                                     # Strategy 3: Try basic ISO format pattern without timezone stripping
-                                    df = df.with_columns(df[col_name].str.to_datetime(format='%Y-%m-%d %H:%M:%S%.f', ).alias(col_name))
+                                    df = df.with_columns(
+                                        df[col_name]
+                                        .str.to_datetime(
+                                            format='%Y-%m-%d %H:%M:%S%.f',
+                                        )
+                                        .alias(col_name)
+                                    )
                                     continue
                                 except Exception as e3:
                                     try:
@@ -2015,7 +2137,13 @@ class Base:
                     # Use strict casting to prevent data quality issues like List(Null) to String conversion
                     # Only use  for datetime conversions that legitimately need it
                     if target_type == 'Datetime':
-                        df = df.with_columns(df[col_name].cast(polars_type, ).alias(col_name))
+                        df = df.with_columns(
+                            df[col_name]
+                            .cast(
+                                polars_type,
+                            )
+                            .alias(col_name)
+                        )
                     else:
                         # Use strict=True for all other types to prevent invalid conversions
                         df = df.with_columns(df[col_name].cast(polars_type, strict=True).alias(col_name))
@@ -2240,9 +2368,7 @@ class Base:
 
                                 return json.dumps([])
 
-                        df_parquet = df_parquet.with_columns(
-                            df_parquet[col_name].map_elements(serialize_list, return_dtype=pd.Utf8).alias(col_name)
-                        )
+                        df_parquet = df_parquet.with_columns(df_parquet[col_name].map_elements(serialize_list, return_dtype=pd.Utf8).alias(col_name))
                     elif dataframe_type == 'Struct' and parquet_type == 'string':
                         # Convert native Struct/dict to JSON string
                         def serialize_struct(x):
@@ -2297,9 +2423,7 @@ class Base:
 
                                 return json.dumps([])
 
-                        df_parquet = df_parquet.with_columns(
-                            df_parquet[col_name].map_elements(serialize_list, return_dtype=pd.Utf8).alias(col_name)
-                        )
+                        df_parquet = df_parquet.with_columns(df_parquet[col_name].map_elements(serialize_list, return_dtype=pd.Utf8).alias(col_name))
                     elif schema_type == 'Struct':
                         # Convert native Struct/dict to JSON string
                         def serialize_struct(x):
@@ -2360,14 +2484,14 @@ class Base:
 
     def _convert_json_strings_to_native_types(self, df, schema_dict: Dict[str, str]):
         """Convert JSON strings to native types based on collector_dataframe_schema.
-        
+
         This handles Stage 2 conversion (JSON strings from CSV → native Polars types).
         Should only be called during collector_dataframe schema application.
-        
+
         Args:
             df: DataFrame with JSON string columns from CSV processing
             schema_dict: collector_dataframe_schema() mapping column names to target types
-            
+
         Returns:
             DataFrame with JSON strings converted to native List types where specified
         """
@@ -2378,24 +2502,23 @@ class Base:
         for col_name, target_type in schema_dict.items():
             if col_name in df.columns and target_type == 'List':
                 current_dtype = str(df[col_name].dtype)
-                
+
                 # Only convert if it's currently a string (JSON) but should be native List
                 if current_dtype in ['Utf8', 'String']:
-                    
+
                     def convert_json_to_list(x):
                         """Convert JSON string to native List format."""
                         if x is None or x == '' or x == 'null':
                             return []
                         return convert_json_to_list_pairs(x)
-                    
+
                     try:
-                        df = df.with_columns(
-                            df[col_name].map_elements(convert_json_to_list, return_dtype=pd.List(pd.List(pd.Utf8))).alias(col_name)
-                        )
+                        df = df.with_columns(df[col_name].map_elements(convert_json_to_list, return_dtype=pd.List(pd.List(pd.Utf8))).alias(col_name))
                     except Exception as e:
                         import logging
+
                         logger = logging.getLogger(__name__)
-                        logger.warning(f"Failed to convert {col_name} from JSON string to List: {e}. Keeping as string.")
+                        logger.warning(f'Failed to convert {col_name} from JSON string to List: {e}. Keeping as string.')
 
         return df
 
@@ -2431,7 +2554,14 @@ class Base:
                         except:
                             return []
 
-                    df = df.with_columns(df[col_name].map_elements(deserialize_list, return_dtype=pd.List(pd.Utf8), ).alias(col_name))
+                    df = df.with_columns(
+                        df[col_name]
+                        .map_elements(
+                            deserialize_list,
+                            return_dtype=pd.List(pd.Utf8),
+                        )
+                        .alias(col_name)
+                    )
                 elif current_dtype in ['Utf8', 'String'] and schema_type == 'Struct':
                     # For Struct types, keep as JSON string for now since Polars Struct requires fixed schema
                     pass

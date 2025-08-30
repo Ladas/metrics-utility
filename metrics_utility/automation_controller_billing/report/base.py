@@ -51,10 +51,21 @@ class Base:
         if hasattr(series, 'map_elements'):  # Polars Series
             import polars as pd
             import json
-            
+
+            # Check if it's a List type column - use direct list.len() for efficiency
+            if hasattr(series, 'list') and hasattr(series.list, 'len'):
+                try:
+                    return series.list.len().cast(pd.Int64)
+                except:
+                    pass  # Fall back to map_elements if list.len() fails
+
             def count_items(x):
                 """Count items in collection, handling JSON strings, sets, and lists."""
-                if isinstance(x, str):
+                # When map_elements is used on List columns, x is passed as a Series
+                if hasattr(x, 'to_list'):
+                    x_list = x.to_list()
+                    return len(x_list)
+                elif isinstance(x, str):
                     try:
                         parsed = json.loads(x)
                         return len(parsed) if isinstance(parsed, (list, set)) else 1
@@ -64,7 +75,7 @@ class Base:
                     return len(x)
                 else:
                     return 1
-            
+
             return series.map_elements(count_items, return_dtype=pd.Int64)
         else:  # pandas Series fallback
             return series.map(lambda x: len(x) if isinstance(x, (set, list)) else 1)
@@ -109,21 +120,26 @@ class Base:
         # If the cell is a Polars Series (from List column), convert to Python list first
         if hasattr(cell, 'to_list'):  # Polars Series object
             cell = cell.to_list()
-        
+
+        # Handle canonical_facts and facts - they should already be JSON strings at this point
+
         # If the cell is a dictionary, convert each set value to a sorted list, then dump as a JSON string.
         if isinstance(cell, dict):
             new_cell = {k: sorted(list(v)) if isinstance(v, set) else v for k, v in cell.items()}
-            return json.dumps(new_cell)
+            result = json.dumps(new_cell)
+            return result
         # If the cell itself is a set, convert it to a sorted list and then to a JSON string.
         elif isinstance(cell, set):
-            return json.dumps(sorted(list(cell)))
+            result = json.dumps(sorted(list(cell)))
+            return result
         # If the cell is a list, convert any set elements inside to sorted lists and dump as a JSON string.
         elif isinstance(cell, list):
             new_cell = [sorted(list(item)) if isinstance(item, set) else item for item in cell]
             # Sort the list itself if it contains strings
             if new_cell and all(isinstance(item, str) for item in new_cell):
                 new_cell = sorted(new_cell)
-            return json.dumps(new_cell)
+            result = json.dumps(new_cell)
+            return result
         # Otherwise, return the cell unchanged.
         return cell
 
@@ -136,7 +152,7 @@ class Base:
         """Convert Polars DataFrame to pandas for use with openpyxl."""
         # Convert Polars to pandas for Excel export
         pandas_df = dataframe.to_pandas()
-        
+
         # Strip timezone information from datetime columns for Excel compatibility
         for col in pandas_df.columns:
             if pandas_df[col].dtype.name.startswith('datetime'):
@@ -145,12 +161,14 @@ class Base:
                     pandas_df[col] = pandas_df[col].dt.tz_convert(None)
                 # Also handle individual datetime objects that might have tzinfo
                 elif pandas_df[col].dtype == 'object':
+
                     def strip_timezone(x):
                         if hasattr(x, 'tzinfo') and x.tzinfo is not None:
                             return x.replace(tzinfo=None)
                         return x
+
                     pandas_df[col] = pandas_df[col].apply(strip_timezone)
-        
+
         return pandas_df
 
     def reset_index_if_needed(self, dataframe):
@@ -186,50 +204,46 @@ class Base:
 
         # Use efficient Polars operations instead of slow map_rows
         # Create composite ID for mapping dataframe using Polars string operations
-        mapping_dataframe = mapping_dataframe.with_columns([
-            (pd.col('original_host_name').cast(str) + '__' + 
-             pd.col('install_uuid').cast(str) + '__' + 
-             pd.col('job_remote_id').cast(str)).alias('host_composite_id')
-        ])
-        
+        mapping_dataframe = mapping_dataframe.with_columns(
+            [
+                (pd.col('original_host_name').cast(str) + '__' + pd.col('install_uuid').cast(str) + '__' + pd.col('job_remote_id').cast(str)).alias(
+                    'host_composite_id'
+                )
+            ]
+        )
+
         # Convert to dictionary for mapping using Polars
         mapping_rows = mapping_dataframe.select(['host_composite_id', 'host_name']).to_dicts()
         mapping_dict = {row['host_composite_id']: str(row['host_name']) for row in mapping_rows}
 
         # Create composite ID for destination dataframe using Polars operations
-        destination_dataframe = destination_dataframe.with_columns([
-            (pd.col('host_name').cast(str) + '__' + 
-             pd.col('install_uuid').cast(str) + '__' + 
-             pd.col('job_remote_id').cast(str)).alias('host_composite_id_temp')
-        ])
-        # Apply mapping using efficient join operation instead of map_rows
-        mapping_df = pd.DataFrame([
-            {'host_composite_id_temp': k, 'mapped_host_name': v} 
-            for k, v in mapping_dict.items()
-        ])
-        
-        # Join to get mapped host names
-        destination_dataframe = destination_dataframe.join(
-            mapping_df, 
-            on='host_composite_id_temp', 
-            how='left'
+        destination_dataframe = destination_dataframe.with_columns(
+            [
+                (pd.col('host_name').cast(str) + '__' + pd.col('install_uuid').cast(str) + '__' + pd.col('job_remote_id').cast(str)).alias(
+                    'host_composite_id_temp'
+                )
+            ]
         )
-        
+        # Apply mapping using efficient join operation instead of map_rows
+        mapping_df = pd.DataFrame([{'host_composite_id_temp': k, 'mapped_host_name': v} for k, v in mapping_dict.items()])
+
+        # Join to get mapped host names
+        destination_dataframe = destination_dataframe.join(mapping_df, on='host_composite_id_temp', how='left')
+
         # Use mapped name if available, otherwise keep original
-        destination_dataframe = destination_dataframe.with_columns([
-            pd.when(pd.col('mapped_host_name').is_not_null())
-            .then(pd.col('mapped_host_name'))
-            .otherwise(pd.col('host_name'))
-            .alias('host_name')
-        ])
-        
+        destination_dataframe = destination_dataframe.with_columns(
+            [pd.when(pd.col('mapped_host_name').is_not_null()).then(pd.col('mapped_host_name')).otherwise(pd.col('host_name')).alias('host_name')]
+        )
+
         # Clean up temporary columns and create final composite ID
         destination_dataframe = destination_dataframe.drop(['host_composite_id_temp', 'mapped_host_name'])
-        destination_dataframe = destination_dataframe.with_columns([
-            (pd.col('host_name').cast(str) + '__' + 
-             pd.col('install_uuid').cast(str) + '__' + 
-             pd.col('job_remote_id').cast(str)).alias('host_composite_id')
-        ])
+        destination_dataframe = destination_dataframe.with_columns(
+            [
+                (pd.col('host_name').cast(str) + '__' + pd.col('install_uuid').cast(str) + '__' + pd.col('job_remote_id').cast(str)).alias(
+                    'host_composite_id'
+                )
+            ]
+        )
 
         return destination_dataframe
 
@@ -256,7 +270,9 @@ class Base:
 
         for col in convert_cols:
             if col in ccsp_report_dataframe.columns:
-                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(ccsp_report_dataframe[col].map_elements(self.convert_cell, return_dtype=pd.String).alias(col))
+                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(
+                    ccsp_report_dataframe[col].map_elements(self.convert_cell, return_dtype=pd.String).alias(col)
+                )
 
         # We're not showing cluster/install_uuid until we support multi-cluster view officially
         if 'install_uuid' in ccsp_report_dataframe.columns:
@@ -377,10 +393,12 @@ class Base:
         }
 
         # Use Polars groupby
-        summary_df = indirect_nodes.group_by(['infra_type', 'infra_bucket', 'device_type']).agg([
-            pd.col('host_name').n_unique().alias('indirect_hosts_unique'),
-            pd.col('host_name').count().alias('indirect_hosts_total'),
-        ])
+        summary_df = indirect_nodes.group_by(['infra_type', 'infra_bucket', 'device_type']).agg(
+            [
+                pd.col('host_name').n_unique().alias('indirect_hosts_unique'),
+                pd.col('host_name').count().alias('indirect_hosts_total'),
+            ]
+        )
         summary_df = self.reset_index_if_needed(summary_df)
 
         # Sort by infrastructure type, then bucket, then device type
@@ -467,13 +485,13 @@ class Base:
                 'facts': [],
                 'events': [],
                 'managed_node_types_set': [],
-                'host_names_before_dedup': []
+                'host_names_before_dedup': [],
             }
             ccsp_report_dataframe = pd.DataFrame(empty_data)
         else:
             agg_dict = {
                 'organizations': ('organization_name', 'nunique'),
-                'host_runs': ('host_name', 'count'),
+                'host_runs': ('host_runs', 'sum'),
                 'task_runs': ('task_runs', 'sum'),
                 'first_automation': ('first_automation', 'min'),
                 'last_automation': ('last_automation', 'max'),
@@ -489,12 +507,12 @@ class Base:
             # Use Polars groupby - simplified to avoid complex field issues
             agg_exprs = [
                 pd.col('organization_name').n_unique().alias('organizations'),
-                pd.col('host_name').count().alias('host_runs'),
+                pd.col('host_runs').sum().alias('host_runs'),  # Sum host_runs to get total job instances
                 pd.col('task_runs').sum().alias('task_runs'),
                 pd.col('first_automation').min().alias('first_automation'),
                 pd.col('last_automation').max().alias('last_automation'),
             ]
-            
+
             # Only add complex field aggregations if they exist and are not causing issues
             try:
                 # Test if these columns exist and contain valid data
@@ -503,71 +521,90 @@ class Base:
                 if 'events' in dataframe.columns:
                     agg_exprs.append(pd.col('events').first().alias('events_list'))
                 if 'canonical_facts' in dataframe.columns:
-                    agg_exprs.append(pd.col('canonical_facts').first().alias('canonical_facts_list'))
+                    # Use proper merging for canonical facts instead of first() to preserve deduplicated data
+                    from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
+
+                    agg_exprs.append(
+                        pd.col('canonical_facts')
+                        .filter(pd.col('canonical_facts').is_not_null())
+                        .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                        .first()
+                        .alias('canonical_facts_list')
+                    )
                 if 'facts' in dataframe.columns:
-                    agg_exprs.append(pd.col('facts').first().alias('facts_list'))
+                    # Use proper merging for facts instead of first() to preserve deduplicated data
+                    from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
+
+                    agg_exprs.append(
+                        pd.col('facts')
+                        .filter(pd.col('facts').is_not_null())
+                        .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+                        .first()
+                        .alias('facts_list')
+                    )
             except Exception as e:
                 # Continue with basic aggregations only
                 pass
-            
+
             # Add dedup aggregation if enabled
             if self.has_dedup_enabled():
                 agg_exprs.append(pd.col('host_names_before_dedup').first().alias('host_names_before_dedup'))
-            
+
             ccsp_report_dataframe = dataframe.group_by('host_name').agg(agg_exprs)
-            
+
             # Now apply the complex merge functions to the collected lists safely
             try:
                 complex_columns = []
-                
+
                 # Only process columns that actually exist
                 if 'managed_node_types_set_list' in ccsp_report_dataframe.columns:
                     complex_columns.append(
-                        ccsp_report_dataframe['managed_node_types_set_list'].map_elements(
-                            lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object
-                        ).alias('managed_node_types_set')
+                        ccsp_report_dataframe['managed_node_types_set_list']
+                        .map_elements(lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object)
+                        .alias('managed_node_types_set')
                     )
                 else:
                     complex_columns.append(pd.lit([]).alias('managed_node_types_set'))
-                    
+
                 if 'events_list' in ccsp_report_dataframe.columns:
                     complex_columns.append(
-                        ccsp_report_dataframe['events_list'].map_elements(
-                            lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object
-                        ).alias('events')
+                        ccsp_report_dataframe['events_list']
+                        .map_elements(lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object)
+                        .alias('events')
                     )
                 else:
                     complex_columns.append(pd.lit([]).alias('events'))
-                    
+
                 if 'canonical_facts_list' in ccsp_report_dataframe.columns:
                     complex_columns.append(
-                        ccsp_report_dataframe['canonical_facts_list'].map_elements(
-                            lambda x: merge_json_sets([x]) if x is not None else {}, return_dtype=pd.Object
-                        ).alias('canonical_facts')
+                        ccsp_report_dataframe['canonical_facts_list']
+                        .map_elements(lambda x: x if x is not None else '{}', return_dtype=pd.Utf8)
+                        .alias('canonical_facts')
                     )
                 else:
-                    complex_columns.append(pd.lit({}).alias('canonical_facts'))
-                    
+                    complex_columns.append(pd.lit('{}').alias('canonical_facts'))
+
                 if 'facts_list' in ccsp_report_dataframe.columns:
                     complex_columns.append(
-                        ccsp_report_dataframe['facts_list'].map_elements(
-                            lambda x: merge_json_sets([x]) if x is not None else {}, return_dtype=pd.Object
-                        ).alias('facts')
+                        ccsp_report_dataframe['facts_list'].map_elements(lambda x: x if x is not None else '{}', return_dtype=pd.Utf8).alias('facts')
                     )
                 else:
-                    complex_columns.append(pd.lit({}).alias('facts'))
-                
+                    complex_columns.append(pd.lit('{}').alias('facts'))
+
                 ccsp_report_dataframe = ccsp_report_dataframe.with_columns(complex_columns)
+
             except Exception as e:
                 # Fallback - just use empty values for complex fields
                 pass
-                ccsp_report_dataframe = ccsp_report_dataframe.with_columns([
-                    pd.lit([]).alias('managed_node_types_set'),
-                    pd.lit([]).alias('events'),
-                    pd.lit({}).alias('canonical_facts'),
-                    pd.lit({}).alias('facts'),
-                ])
-            
+                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(
+                    [
+                        pd.lit([]).alias('managed_node_types_set'),
+                        pd.lit([]).alias('events'),
+                        pd.lit({}).alias('canonical_facts'),
+                        pd.lit({}).alias('facts'),
+                    ]
+                )
+
             # Drop the temporary list columns safely
             cols_to_drop = []
             for col in ['managed_node_types_set_list', 'events_list', 'canonical_facts_list', 'facts_list']:
@@ -603,7 +640,9 @@ class Base:
 
         for col in convert_cols:
             if col in ccsp_report_dataframe.columns:
-                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(ccsp_report_dataframe[col].map_elements(self.convert_cell, return_dtype=pd.String).alias(col))
+                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(
+                    ccsp_report_dataframe[col].map_elements(self.convert_cell, return_dtype=pd.String).alias(col)
+                )
 
         if mode == 'by_organization':
             # Filter some columns out based on mode
@@ -665,13 +704,7 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'collection_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame({
-                'collection_name': [],
-                'host_runs_unique': [],
-                'host_runs': [],
-                'task_runs': [],
-                'duration': []
-            })
+            ccsp_report_dataframe = pd.DataFrame({'collection_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {
@@ -682,15 +715,17 @@ class Base:
             }
 
             # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['collection_name']).agg([
-                pd.col('host_name').n_unique().alias('host_runs_unique'),
-                pd.col('host_composite_id').n_unique().alias('host_runs'),
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('duration').sum().alias('duration'),
-            ])
+            ccsp_report_dataframe = dataframe.group_by(['collection_name']).agg(
+                [
+                    pd.col('host_name').n_unique().alias('host_runs_unique'),
+                    pd.col('host_composite_id').n_unique().alias('host_runs'),
+                    pd.col('task_runs').sum().alias('task_runs'),
+                    pd.col('duration').sum().alias('duration'),
+                ]
+            )
             # Reset index only for grouped data (collection_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
-            
+
             # Sort by collection_name to ensure consistent ordering
             ccsp_report_dataframe = ccsp_report_dataframe.sort('collection_name')
 
@@ -733,13 +768,7 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'role_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame({
-                'role_name': [],
-                'host_runs_unique': [],
-                'host_runs': [],
-                'task_runs': [],
-                'duration': []
-            })
+            ccsp_report_dataframe = pd.DataFrame({'role_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {
@@ -750,15 +779,17 @@ class Base:
             }
 
             # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['role_name']).agg([
-                pd.col('host_name').n_unique().alias('host_runs_unique'),
-                pd.col('host_composite_id').n_unique().alias('host_runs'),
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('duration').sum().alias('duration'),
-            ])
+            ccsp_report_dataframe = dataframe.group_by(['role_name']).agg(
+                [
+                    pd.col('host_name').n_unique().alias('host_runs_unique'),
+                    pd.col('host_composite_id').n_unique().alias('host_runs'),
+                    pd.col('task_runs').sum().alias('task_runs'),
+                    pd.col('duration').sum().alias('duration'),
+                ]
+            )
             # Reset index only for grouped data (role_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
-            
+
             # Sort by role_name to ensure consistent ordering
             ccsp_report_dataframe = ccsp_report_dataframe.sort('role_name')
 
@@ -802,13 +833,7 @@ class Base:
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'module_name' not in dataframe.columns:
             # Create empty dataframe with expected columns
-            ccsp_report_dataframe = pd.DataFrame({
-                'module_name': [],
-                'host_runs_unique': [],
-                'host_runs': [],
-                'task_runs': [],
-                'duration': []
-            })
+            ccsp_report_dataframe = pd.DataFrame({'module_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
             # Take the content explorer dataframe and extract specific group by
             agg_dict = {
@@ -819,15 +844,17 @@ class Base:
             }
 
             # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['module_name']).agg([
-                pd.col('host_name').n_unique().alias('host_runs_unique'),
-                pd.col('host_composite_id').n_unique().alias('host_runs'),
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('duration').sum().alias('duration'),
-            ])
+            ccsp_report_dataframe = dataframe.group_by(['module_name']).agg(
+                [
+                    pd.col('host_name').n_unique().alias('host_runs_unique'),
+                    pd.col('host_composite_id').n_unique().alias('host_runs'),
+                    pd.col('task_runs').sum().alias('task_runs'),
+                    pd.col('duration').sum().alias('duration'),
+                ]
+            )
             # Reset index only for grouped data (module_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
-            
+
             # Sort by module_name to ensure consistent ordering
             ccsp_report_dataframe = ccsp_report_dataframe.sort('module_name')
 

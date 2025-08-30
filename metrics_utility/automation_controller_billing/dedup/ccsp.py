@@ -22,7 +22,7 @@ class DedupCCSP:
             # For non-experimental mode, do NOT deduplicate by serial numbers
             # Only the experimental mode should perform serial-based deduplication
             # Return the data as-is without any deduplication
-            print("DEBUG DEDUP: Non-experimental CCSP mode - no deduplication by serial numbers")
+            print('DEBUG DEDUP: Non-experimental CCSP mode - no deduplication by serial numbers')
             return new
 
         # each host_name in dedup_info has a list of combined serials
@@ -60,9 +60,9 @@ class DedupCCSP:
         serial_to_hosts = defaultdict(set)
         serial_to_first = {}
 
-        print(f"DEBUG DEDUP MAPPING: Input dataframe has {len(df)} records")
+        print(f'DEBUG DEDUP MAPPING: Input dataframe has {len(df)} records')
         if 'host_name' in df.columns:
-            print(f"DEBUG DEDUP MAPPING: Input hosts: {sorted(df['host_name'].unique().to_list())}")
+            print(f'DEBUG DEDUP MAPPING: Input hosts: {sorted(df["host_name"].unique().to_list())}')
 
         # Handle both pandas and polars DataFrame iteration methods
         if hasattr(df, 'iter_rows'):  # Polars DataFrame
@@ -71,13 +71,13 @@ class DedupCCSP:
             iterator = (row for _, row in df.iterrows())
 
         missing_hosts = ['manually_created_host_1', 'test_host_42']
-        
+
         for row in iterator:
             host = row['host_name']
             serials = row['serials']
 
             if host in missing_hosts:
-                print(f"DEBUG DEDUP MAPPING: Processing {host}: serials={serials}, type={type(serials)}")
+                print(f'DEBUG DEDUP MAPPING: Processing {host}: serials={serials}, type={type(serials)}')
 
             if serials is not None and len(serials) > 0:
                 # Handle string serials (convert to list if needed)
@@ -85,15 +85,15 @@ class DedupCCSP:
                     serial_list = [serials] if serials else []
                 else:
                     serial_list = serials if hasattr(serials, '__iter__') else [serials]
-                    
+
                 for serial in serial_list:
                     if serial:
                         serial_to_hosts[serial].add(host)
                         if serial not in serial_to_first:
                             serial_to_first[serial] = host
-                            
+
                         if host in missing_hosts:
-                            print(f"DEBUG DEDUP MAPPING: {host} mapped to serial {serial}")
+                            print(f'DEBUG DEDUP MAPPING: {host} mapped to serial {serial}')
 
         host_to_canonical = {}
         for serial, hosts in serial_to_hosts.items():
@@ -101,13 +101,13 @@ class DedupCCSP:
             for host in hosts:
                 host_to_canonical[host] = canonical
                 if host in missing_hosts:
-                    print(f"DEBUG DEDUP MAPPING: {host} -> canonical {canonical}")
+                    print(f'DEBUG DEDUP MAPPING: {host} -> canonical {canonical}')
 
-        print(f"DEBUG DEDUP MAPPING: Created mapping for {len(host_to_canonical)} hosts")
+        print(f'DEBUG DEDUP MAPPING: Created mapping for {len(host_to_canonical)} hosts')
         for missing_host in missing_hosts:
             if missing_host in host_to_canonical:
-                print(f"DEBUG DEDUP MAPPING: ✓ {missing_host} mapped to {host_to_canonical[missing_host]}")
+                print(f'DEBUG DEDUP MAPPING: ✓ {missing_host} mapped to {host_to_canonical[missing_host]}')
             else:
-                print(f"DEBUG DEDUP MAPPING: ✗ {missing_host} NOT in mapping (will be filtered out)")
+                print(f'DEBUG DEDUP MAPPING: ✗ {missing_host} NOT in mapping (will be filtered out)')
 
         return host_to_canonical

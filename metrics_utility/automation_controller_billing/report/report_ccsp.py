@@ -103,7 +103,7 @@ class ReportCCSP(Base):
             # Use Polars-compatible filtering syntax
             direct_filter = job_host_summary_dataframe['managed_node_type'] == DIRECT
             indirect_filter = job_host_summary_dataframe['managed_node_type'] == INDIRECT
-            
+
             directs = (
                 job_host_summary_dataframe.filter(direct_filter)
                 if hasattr(job_host_summary_dataframe, 'filter')
@@ -279,27 +279,17 @@ class ReportCCSP(Base):
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'host_name' not in dataframe.columns:
             # Create empty dataframe with expected structure for empty case
-            ccsp_report = pd.DataFrame({
-                'organization_name': [],
-                'quantity_consumed': []
-            })
+            ccsp_report = pd.DataFrame({'organization_name': [], 'quantity_consumed': []})
         else:
             # Use Polars-compatible groupby
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
-                ccsp_report = dataframe.group_by('organization_name').agg([
-                    pd.col('host_name').n_unique().alias('quantity_consumed')
-                ])
+                ccsp_report = dataframe.group_by('organization_name').agg([pd.col('host_name').n_unique().alias('quantity_consumed')])
             else:  # pandas DataFrame fallback
                 ccsp_report = dataframe.reset_index().groupby('organization_name', dropna=False).agg(quantity_consumed=('host_name', 'nunique'))
         # Add columns using Polars syntax
         if hasattr(ccsp_report, 'with_columns'):  # Polars DataFrame
-            ccsp_report = ccsp_report.with_columns([
-                pd.lit('').alias('mark_x'),
-                pd.lit(round(self.price_per_node, 2)).alias('unit_price')
-            ])
-            ccsp_report = ccsp_report.with_columns(
-                (pd.col('quantity_consumed') * pd.col('unit_price')).round(2).alias('extended_unit_price')
-            )
+            ccsp_report = ccsp_report.with_columns([pd.lit('').alias('mark_x'), pd.lit(round(self.price_per_node, 2)).alias('unit_price')])
+            ccsp_report = ccsp_report.with_columns((pd.col('quantity_consumed') * pd.col('unit_price')).round(2).alias('extended_unit_price'))
         else:  # pandas DataFrame fallback
             ccsp_report['mark_x'] = ''
             ccsp_report['unit_price'] = round(self.price_per_node, 2)
@@ -313,14 +303,15 @@ class ReportCCSP(Base):
             ccsp_report = ccsp_report.reindex(columns=['organization_name', 'mark_x', 'quantity_consumed', 'unit_price', 'extended_unit_price'])
 
         # Rename the columns based on the template
-        ccsp_report_dataframe = self.rename_dataframe(ccsp_report, 
+        ccsp_report_dataframe = self.rename_dataframe(
+            ccsp_report,
             {
                 'organization_name': 'Organization name (i.e. company name)',
                 'mark_x': "Please Mark With An 'X' If The Usage Is Internal. \nOtherwise Leave Blank",
                 'quantity_consumed': 'Red Hat SKU\n Quantity Consumed',
                 'unit_price': 'Subscription Fee\n (SKU Unit Price)',
                 'extended_unit_price': 'Extended\n Subscription Fees\n (SKU Extended Unit Price)',
-            }
+            },
         )
 
         row_counter = 0
