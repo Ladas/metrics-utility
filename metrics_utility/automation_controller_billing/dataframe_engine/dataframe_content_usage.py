@@ -238,14 +238,14 @@ class DataframeContentUsage(Base):
         return ['task_runs', 'duration']
 
     @staticmethod
-    def initial_aggregations():
+    def group_aggregations():
         """Define how to aggregate raw CSV data when grouping by unique_index_columns during initial processing.
 
         This is used in the group() method when processing CSV data from a single file/batch.
         For duplicate records with the same unique index, these aggregations combine the data.
 
         Returns:
-            dict: Mapping of column_name -> aggregation_expression for Polars group_by().agg()
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
         """
         return {
             # Data columns aggregation rules for initial CSV processing
@@ -254,26 +254,17 @@ class DataframeContentUsage(Base):
         }
 
     @staticmethod
-    def operations():
-        """Define how to merge rollup data when combining multiple rollup files.
+    def regroup_aggregations():
+        """Define how to aggregate rollup data when combining multiple rollup files during regroup operations.
 
-        This is used by the summarize_merged_dataframes() method in the base class
-        when resolving conflicts from join operations during rollup merging.
-
+        This is used in the regroup() method when merging pre-aggregated data from different batches/files.
+        
         Returns:
-            dict: Mapping of column_name -> operation for resolving merge conflicts
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
         """
         return {
-            # Index columns - should be identical but use min as safe fallback
-            'host_name': 'min',
-            'module_name': 'min',
-            'collection_name': 'min',
-            'role_name': 'min',
-            'install_uuid': 'min',
-            'job_remote_id': 'min',
-            # Data columns - sum the counts and durations
-            'task_runs': 'sum',
-            'duration': 'sum',
+            'task_runs': 'sum',  # Sum task runs across rollups
+            'duration': 'sum',  # Sum duration across rollups
         }
 
     # ========================================
@@ -379,13 +370,13 @@ class DataframeContentUsage(Base):
             },
         )
 
-        # Use proper aggregation based on initial_aggregations() method
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-            [
-                pd.col('module_name').count().alias('task_runs'),  # Count tasks (each row represents one task)
-                pd.col('duration').sum().alias('duration'),  # Sum duration across duplicate records
-            ]
-        )
+        # Use centralized aggregation system from base class
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build aggregation expressions using centralized system
+        agg_exprs = build_aggregation_expressions(self.group_aggregations())
+        
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
 
         # Duration is null in older versions of Controller - handle with schema defaults
         result = result.with_columns(result['duration'].fill_null(0).alias('duration'))
@@ -427,12 +418,13 @@ class DataframeContentUsage(Base):
             },
         )
 
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-            [
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('duration').sum().alias('duration'),
-            ]
-        )
+        # Use centralized aggregation system for regroup operations
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build regroup aggregation expressions using centralized system
+        regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
+        
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0

@@ -390,6 +390,7 @@ class DataframeJobhostSummaryUsage(Base):
         """Define columns that uniquely identify a record for grouping/deduplication."""
         return ['organization_name', 'job_template_name', 'host_name', 'original_host_name', 'install_uuid', 'job_remote_id']
 
+
     @staticmethod
     def data_columns():
         """Define data columns that need aggregation when grouping records."""
@@ -408,23 +409,53 @@ class DataframeJobhostSummaryUsage(Base):
         ]
 
     @staticmethod
-    def initial_aggregations():
+    def group_aggregations():
         """Define how to aggregate raw CSV data when grouping by unique_index_columns during initial processing.
 
         This is used in the group() method when processing CSV data from a single file/batch.
         For duplicate records with the same unique index, these aggregations combine the data.
 
         Returns:
-            dict: Mapping of column_name -> aggregation_expression for Polars group_by().agg()
+            dict: Mapping with aliasing support {alias: (source_column, aggregation)} or {column: aggregation}
         """
         return {
             # Data columns aggregation rules for initial CSV processing
             'task_runs': 'sum',  # Sum task runs across duplicate records
             'host_runs': 'count',  # Count host occurrences (each record represents one host run)
-            'first_automation': 'min',  # Earliest timestamp among duplicates
-            'last_automation': 'max',  # Latest timestamp among duplicates
-            'job_created': 'max',  # Latest job creation time
+            # Datetime aggregations with proper source column aliasing
+            'first_automation': ('created', 'min_non_null'),  # min(created) -> first_automation
+            'last_automation': ('created', 'max_non_null'),   # max(created) -> last_automation
+            'job_created': ('job_created', 'max_non_null'),   # Latest job creation time (null-aware)
             'managed_node_type': 'min',  # Use lowest managed node type (DIRECT=0, INDIRECT=1)
+            'canonical_facts': 'merge_json_facts',  # Merge JSON fact strings
+            'facts': 'merge_json_facts',  # Merge JSON fact strings
+            'managed_node_types_set': 'flatten_unique',  # Flatten and get unique from List columns
+            'events': 'merge_lists_unique',  # Merge event lists with unique values
+            'host_names_before_dedup': 'merge_lists_unique',  # Merge host name lists
+        }
+
+    @staticmethod
+    def regroup_aggregations():
+        """Define how to aggregate rollup data when combining multiple rollup files during regroup operations.
+
+        This is used in the regroup() method when merging pre-aggregated data from different batches/files.
+        
+        Returns:
+            dict: Mapping with aliasing support {alias: (source_column, aggregation)} or {column: aggregation}
+        """
+        return {
+            'task_runs': 'sum',  # Sum task runs across rollups
+            'host_runs': 'sum',  # Sum host runs across rollups
+            # Datetime aggregations - same column names as they already exist in rollup data
+            'first_automation': ('first_automation', 'min_non_null'),  # Earliest timestamp across rollups (null-aware)
+            'last_automation': ('last_automation', 'max_non_null'),    # Latest timestamp across rollups (null-aware)
+            'job_created': ('job_created', 'max_non_null'),           # Latest job creation time across rollups (null-aware)
+            'managed_node_type': 'min',  # Use lowest managed node type across rollups
+            'canonical_facts': 'merge_json_facts',  # Merge JSON fact strings from different rollups
+            'facts': 'merge_json_facts',  # Merge JSON fact strings from different rollups
+            'managed_node_types_set': 'flatten_unique',  # Flatten and get unique from List columns
+            'events': 'flatten_unique',  # Flatten and get unique from List columns
+            'host_names_before_dedup': 'flatten_unique',  # Flatten and get unique from List columns
         }
 
     @staticmethod
@@ -624,12 +655,15 @@ class DataframeJobhostSummaryUsage(Base):
 
     def _add_metadata_columns(self, billing_data, batch_data, managed_node_type):
         """Add core metadata columns required for all records."""
+        managed_node_type_string = MANAGED_NODE_TYPES[managed_node_type]
         return billing_data.with_columns(
             [
                 pd.lit(managed_node_type).cast(pd.Int64).alias('managed_node_type'),
-                pd.lit(MANAGED_NODE_TYPES[managed_node_type]).alias('managed_node_type_string'),
+                pd.lit(managed_node_type_string).alias('managed_node_type_string'),
                 pd.lit(batch_data['config']['install_uuid']).alias('install_uuid'),
                 billing_data['host_name'].alias('original_host_name'),
+                # Initialize managed_node_types_set with the current managed node type string
+                pd.lit([managed_node_type_string]).alias('managed_node_types_set'),
             ]
         )
 
@@ -638,13 +672,13 @@ class DataframeJobhostSummaryUsage(Base):
         # Add initial host_runs
         billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
 
-        # Apply ansible_host_variable mapping if present
-        billing_data = self._apply_host_variable_mapping(billing_data)
-
-        # Add host tracking columns AFTER hostname mapping to capture final hostnames
+        # Add host tracking columns BEFORE hostname mapping to capture original hostnames
         billing_data = billing_data.with_columns(
             [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
         )
+
+        # Apply ansible_host_variable mapping if present
+        billing_data = self._apply_host_variable_mapping(billing_data)
 
         # Calculate task_runs by summing task counters
         task_calc_start = time.time()
@@ -687,13 +721,13 @@ class DataframeJobhostSummaryUsage(Base):
         # Add initial host_runs
         billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
 
-        # Apply ansible_host_variable mapping if present
-        billing_data = self._apply_host_variable_mapping(billing_data)
-
-        # Add host tracking columns AFTER hostname mapping to capture final hostnames
+        # Add host tracking columns BEFORE hostname mapping to capture original hostnames
         billing_data = billing_data.with_columns(
             [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
         )
+
+        # Apply ansible_host_variable mapping if present
+        billing_data = self._apply_host_variable_mapping(billing_data)
 
         # For indirect nodes, task_runs is always 1 (each record represents one task)
         billing_data = billing_data.with_columns(pd.lit(1).alias('task_runs'))
@@ -825,100 +859,13 @@ class DataframeJobhostSummaryUsage(Base):
         )
 
         try:
-            # Use proper aggregation for both numeric and complex data types
-            # Follow demo_prompt_facts.md approach for facts aggregation
-            from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts, merge_list_arrays
-
-            group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-                [
-                    # Numeric aggregations
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('host_name').count().alias('host_runs'),
-                    # CRITICAL: Filter null values before min/max aggregation to prevent inconsistent results
-                    # This ensures that null values don't interfere with timestamp aggregation during initial CSV processing
-                    pd.col('created').filter(pd.col('created').is_not_null()).min().alias('first_automation'),
-                    pd.col('created').filter(pd.col('created').is_not_null()).max().alias('last_automation'),
-                    pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
-                    pd.col('managed_node_type').min().alias('managed_node_type'),
-                    # Complex type aggregations - JSON strings (merge values properly)
-                    # Facts: Merge JSON string values using merge_and_stringify_facts
-                    pd.col('canonical_facts')
-                    .filter(pd.col('canonical_facts').is_not_null())
-                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                    .first()
-                    .alias('canonical_facts'),
-                    pd.col('facts')
-                    .filter(pd.col('facts').is_not_null())
-                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                    .first()
-                    .alias('facts'),
-                    # Collections: Collect values into lists - handle both String and List inputs safely
-                    pd.col('managed_node_type_string')
-                    .filter(pd.col('managed_node_type_string').is_not_null())
-                    .map_batches(
-                        lambda s: pd.Series([sorted(list(set([str(v) for v in s.to_list() if v is not None])))]), return_dtype=pd.List(pd.Utf8)
-                    )
-                    .first()
-                    .alias('managed_node_types_list'),
-                    pd.col('events')
-                    .filter(pd.col('events').is_not_null())
-                    .map_batches(
-                        lambda s: pd.Series(
-                            [
-                                sorted(
-                                    list(
-                                        set(
-                                            [
-                                                str(item)
-                                                for sublist in s.to_list()
-                                                if sublist is not None
-                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                if item is not None
-                                            ]
-                                        )
-                                    )
-                                )
-                            ]
-                        ),
-                        return_dtype=pd.List(pd.Utf8),
-                    )
-                    .first()
-                    .alias('events_list'),
-                    pd.col('host_names_before_dedup')
-                    .filter(pd.col('host_names_before_dedup').is_not_null())
-                    .map_batches(
-                        lambda s: pd.Series(
-                            [
-                                sorted(
-                                    list(
-                                        set(
-                                            [
-                                                str(item)
-                                                for sublist in s.to_list()
-                                                if sublist is not None
-                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                if item is not None
-                                            ]
-                                        )
-                                    )
-                                )
-                            ]
-                        ),
-                        return_dtype=pd.List(pd.Utf8),
-                    )
-                    .first()
-                    .alias('host_names_list'),
-                ]
-            )
-
-            # Rename the list columns to their final names (keep as native Lists)
-            group = group.rename(
-                {
-                    'managed_node_types_list': 'managed_node_types_set',
-                    'events_list': 'events',
-                    'host_names_list': 'host_names_before_dedup',
-                }
-            )
+            # Use centralized aggregation system from base class
+            from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+            
+            # Build aggregation expressions using centralized system
+            agg_exprs = build_aggregation_expressions(self.group_aggregations())
+            
+            group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
         except TypeError as e:
             # Log the error but don't try to fix it inline - let the schema system handle it
             add_span_attributes(current_span, **{'dataframe.group.type_error': str(e)})
@@ -952,122 +899,36 @@ class DataframeJobhostSummaryUsage(Base):
     def regroup(self, dataframe):
         """Regroup pre-aggregated dataframe with performance tracking.
 
-        TODO: Implement complex type merging to match operations() method functionality.
-        Currently using simplified aggregation for JSON strings and sets.
-        Should implement proper 'combine_set' and 'combine_json_values' operations.
+        Uses dedup_index_columns() instead of unique_index_columns() to properly aggregate
+        records that represent the same deduplicated host but came from different jobs.
+        This ensures host_names_before_dedup and other host-level fields are properly merged.
         """
         current_span = trace.get_current_span()
 
         start_time = time.time()
         input_count = len(dataframe) if dataframe is not None else 0
 
+        # Use the standard unique index columns to preserve individual job records
+        group_columns = self.unique_index_columns()
+
         add_span_attributes(
             current_span,
             **{
                 'dataframe.regroup.input_record_count': input_count,
-                'dataframe.regroup.index_columns': len(self.unique_index_columns()),
+                'dataframe.regroup.index_columns': len(group_columns),
                 'dataframe.regroup.operation': 'regroup_after_dedup',
+                'dataframe.regroup.group_by_columns': group_columns,
             },
         )
 
-        # Use proper merging for complex types during rollup aggregation
-        from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts, merge_list_arrays
+        # Use centralized aggregation system for regroup operations
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build regroup aggregation expressions using centralized system
+        regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
 
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-            [
-                # Numeric aggregations
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('job_remote_id').count().alias('host_runs'),  # Count job instances per host (number of jobs each host ran)
-                # CRITICAL: Filter null values before min/max aggregation to prevent inconsistent results
-                # This ensures that null values don't interfere with timestamp aggregation
-                pd.col('first_automation').filter(pd.col('first_automation').is_not_null()).min().alias('first_automation'),
-                pd.col('last_automation').filter(pd.col('last_automation').is_not_null()).max().alias('last_automation'),
-                pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
-                pd.col('managed_node_type').min().alias('managed_node_type'),
-                # Complex type aggregations - JSON strings (merge values properly)
-                # Facts: JSON strings from previous aggregation, merge using merge_and_stringify_facts
-                pd.col('canonical_facts')
-                .filter(pd.col('canonical_facts').is_not_null())
-                .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                .first()
-                .alias('canonical_facts'),
-                pd.col('facts')
-                .filter(pd.col('facts').is_not_null())
-                .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                .first()
-                .alias('facts'),
-                # Collections: Use native List merging safely
-                pd.col('managed_node_types_set')
-                .map_batches(
-                    lambda s: pd.Series(
-                        [
-                            sorted(
-                                list(
-                                    set(
-                                        [
-                                            str(item)
-                                            for sublist in s.to_list()
-                                            if sublist is not None
-                                            for item in (sublist if isinstance(sublist, list) else [sublist])
-                                            if item is not None
-                                        ]
-                                    )
-                                )
-                            )
-                        ]
-                    ),
-                    return_dtype=pd.List(pd.Utf8),
-                )
-                .first()
-                .alias('managed_node_types_set'),
-                pd.col('events')
-                .map_batches(
-                    lambda s: pd.Series(
-                        [
-                            sorted(
-                                list(
-                                    set(
-                                        [
-                                            str(item)
-                                            for sublist in s.to_list()
-                                            if sublist is not None
-                                            for item in (sublist if isinstance(sublist, list) else [sublist])
-                                            if item is not None
-                                        ]
-                                    )
-                                )
-                            )
-                        ]
-                    ),
-                    return_dtype=pd.List(pd.Utf8),
-                )
-                .first()
-                .alias('events'),
-                pd.col('host_names_before_dedup')
-                .map_batches(
-                    lambda s: pd.Series(
-                        [
-                            sorted(
-                                list(
-                                    set(
-                                        [
-                                            str(item)
-                                            for sublist in s.to_list()
-                                            if sublist is not None
-                                            for item in (sublist if isinstance(sublist, list) else [sublist])
-                                            if item is not None
-                                        ]
-                                    )
-                                )
-                            )
-                        ]
-                    ),
-                    return_dtype=pd.List(pd.Utf8),
-                )
-                .first()
-                .alias('host_names_before_dedup'),
-            ]
-        )
+        result = dataframe.group_by(group_columns, maintain_order=True).agg(regroup_exprs)
+
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0
@@ -1093,12 +954,33 @@ class DataframeJobhostSummaryUsage(Base):
         Override dedup method to enrich canonical facts and facts from scope_dataframe
         when experimental deduplication is enabled.
         """
-
         if dataframe is None or len(dataframe) == 0:
             return self.empty()
 
+        if not hostname_mapping:
+            return dataframe
+
+        # DEBUG: Log web01 records before deduplication
+        import polars as pd
+        web01_before = dataframe.filter(pd.col('host_name').str.contains('web01'))
+        if len(web01_before) > 0:
+            print(f"DEBUG DEDUP: web01 records BEFORE deduplication ({len(web01_before)} records):")
+            for row in web01_before.iter_rows(named=True):
+                print(f"  {row['host_name']} (orig: {row['original_host_name']}) - job_id: {row['job_remote_id']}")
+            print()
+
+        # CRITICAL: Preserve ALL original hostnames in host_names_before_dedup BEFORE any hostname mapping
+        # The host_names_before_dedup field should contain ALL original host names that will be
+        # mapped to the same canonical hostname during deduplication - this happens BEFORE mapping
+        if 'original_host_name' in dataframe.columns and 'host_names_before_dedup' in dataframe.columns:
+            # Use original_host_name instead of host_name to capture the true original hostnames
+            # This ensures we capture the actual original hostnames before any mapping occurs
+            dataframe = dataframe.with_columns([
+                pd.col('original_host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')
+            ])
+
         # Enrich direct managed nodes with canonical facts and facts from scope data
-        # when experimental deduplication is enabled (regardless of hostname mapping)
+        # when experimental deduplication is enabled
         experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
 
         if experimental_dedup and scope_dataframe is not None and len(scope_dataframe) > 0:
@@ -1107,299 +989,74 @@ class DataframeJobhostSummaryUsage(Base):
                 # Filter to only direct managed nodes for enrichment
                 direct_mask = dataframe['managed_node_type'] == DIRECT  # DIRECT = 0
 
-                # Use Polars DataFrame operations
-                # Check if there are any direct nodes
-                if dataframe.filter(direct_mask).shape[0] > 0:
-                    # Create a mapping from scope dataframe using Polars
-                    scope_mapping = {}
+                if direct_mask.any():
+                    # Convert scope_dataframe to a mapping dictionary for efficient lookup
+                    host_facts_mapping = {}
                     for row in scope_dataframe.iter_rows(named=True):
-                        # Keep facts as JSON strings to match dataframe_schema expectations
-                        canonical_facts_json = row.get('canonical_facts', '{}')
-                        facts_json = row.get('facts', '{}')
+                        # Parse JSON strings from scope_dataframe if needed
+                        canonical_facts = row.get('canonical_facts', {})
+                        facts = row.get('facts', {})
+                        
+                        # Handle case where canonical_facts and facts are JSON strings
+                        if isinstance(canonical_facts, str):
+                            try:
+                                canonical_facts = json.loads(canonical_facts) if canonical_facts else {}
+                            except:
+                                canonical_facts = {}
+                        
+                        if isinstance(facts, str):
+                            try:
+                                facts = json.loads(facts) if facts else {}
+                            except:
+                                facts = {}
+                        
+                        host_facts_mapping[row['host_name']] = {
+                            'canonical_facts': canonical_facts,
+                            'facts': facts
+                        }
 
-                        # Enrichment data ready for mapping
+                    # Enrich canonical_facts and facts for direct managed nodes using Polars operations
+                    def enrich_canonical_facts(host_name):
+                        facts_data = host_facts_mapping.get(host_name, {}).get('canonical_facts', {})
+                        if isinstance(facts_data, dict):
+                            return json.dumps(facts_data) if facts_data else '{}'
+                        elif isinstance(facts_data, str):
+                            return facts_data if facts_data else '{}'
+                        else:
+                            return '{}'
 
-                        scope_mapping[row['host_name']] = {'canonical_facts': canonical_facts_json, 'facts': facts_json}
+                    def enrich_facts(host_name):
+                        facts_data = host_facts_mapping.get(host_name, {}).get('facts', {})
+                        if isinstance(facts_data, dict):
+                            return json.dumps(facts_data) if facts_data else '{}'
+                        elif isinstance(facts_data, str):
+                            return facts_data if facts_data else '{}'
+                        else:
+                            return '{}'
 
-                    # Update canonical_facts and facts for direct managed nodes using native Polars operations
-                    # Keep everything in native List format to maintain schema consistency
-                    try:
-                        # Create mapping DataFrame with JSON strings matching dataframe_schema
-                        mapping_data = []
-                        for host_name, data in scope_mapping.items():
-                            mapping_data.append(
-                                {
-                                    'host_name': host_name,
-                                    'scope_canonical_facts': data.get('canonical_facts', '{}'),
-                                    'scope_facts': data.get('facts', '{}'),
-                                }
-                            )
-
-                        if mapping_data:
-                            scope_mapping_df = pd.DataFrame(mapping_data)
-
-                            # No schema application needed - working with JSON strings consistently
-
-                            # Join with scope mapping and conditionally update based on managed_node_type
-                            dataframe = dataframe.join(scope_mapping_df, on='host_name', how='left')
-
-                            # Update canonical_facts for direct managed nodes only using JSON string operations
-                            dataframe = dataframe.with_columns(
-                                [
-                                    pd.when(pd.col('managed_node_type') == DIRECT)
-                                    .then(pd.col('scope_canonical_facts'))
-                                    .otherwise(pd.col('canonical_facts'))
-                                    .alias('canonical_facts')
-                                ]
-                            )
-
-                            # Update facts for direct managed nodes only using JSON string operations
-                            dataframe = dataframe.with_columns(
-                                [pd.when(pd.col('managed_node_type') == DIRECT).then(pd.col('scope_facts')).otherwise(pd.col('facts')).alias('facts')]
-                            )
-
-                            # Remove temporary join columns
-                            dataframe = dataframe.drop(['scope_canonical_facts', 'scope_facts'])
-
-                            # Apply schema to ensure consistency after join operations
-                            dataframe = self.apply_complete_schema(dataframe, schema_type='dataframe', operation_context='after_scope_enrichment')
-
-                    except Exception as join_error:
-                        # Fallback: skip enrichment if join approach fails
-                        print(f'Warning: Scope enrichment join failed: {join_error}, skipping enrichment')
-                        pass
+                    # Apply enrichment only to direct managed nodes
+                    dataframe = dataframe.with_columns([
+                        pd.when(pd.col('managed_node_type') == DIRECT)
+                        .then(pd.col('host_name').map_elements(enrich_canonical_facts, return_dtype=pd.Utf8))
+                        .otherwise(pd.col('canonical_facts'))
+                        .alias('canonical_facts'),
+                        
+                        pd.when(pd.col('managed_node_type') == DIRECT)
+                        .then(pd.col('host_name').map_elements(enrich_facts, return_dtype=pd.Utf8))
+                        .otherwise(pd.col('facts'))
+                        .alias('facts')
+                    ])
 
         # Call the parent dedup method to perform the actual deduplication
-        # Only proceed with hostname-based deduplication if we have a mapping
-        if hostname_mapping:
-            result = super().dedup(dataframe, hostname_mapping)
-        else:
-            # No hostname mapping, just return the enriched dataframe
-            result = dataframe
-
-        # Additional step for experimental deduplication: merge records with same machine_id
-        # This handles cases where hosts have different job_remote_id but same physical machine
-        if experimental_dedup and result is not None and len(result) > 0:
-            # Parse canonical_facts to extract machine_id for grouping
-            if 'canonical_facts' in result.columns:
-                try:
-                    # Add machine_id and product_serial columns for grouping
-                    def extract_machine_id(canonical_facts_json):
-                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
-                            return None
-                        try:
-                            import json
-
-                            facts_dict = json.loads(canonical_facts_json)
-                            machine_ids = facts_dict.get('ansible_machine_id', [])
-                            if isinstance(machine_ids, list) and machine_ids:
-                                return machine_ids[0]  # Take first machine_id
-                            return None
-                        except:
-                            return None
-
-                    def extract_product_serial(canonical_facts_json):
-                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
-                            return None
-                        try:
-                            import json
-
-                            facts_dict = json.loads(canonical_facts_json)
-                            serials = facts_dict.get('ansible_product_serial', [])
-                            if isinstance(serials, list) and serials:
-                                return serials[0]  # Take first serial
-                            return None
-                        except:
-                            return None
-
-                    result = result.with_columns(
-                        [
-                            result['canonical_facts'].map_elements(extract_machine_id, return_dtype=pd.String).alias('machine_id_for_dedup'),
-                            result['canonical_facts'].map_elements(extract_product_serial, return_dtype=pd.String).alias('product_serial_for_dedup'),
-                        ]
-                    )
-
-                    # Create a composite key for deduplication: machine_id + serial only
-                    result = result.with_columns(
-                        [
-                            (pd.col('machine_id_for_dedup').fill_null('') + '__' + pd.col('product_serial_for_dedup').fill_null('')).alias(
-                                'dedup_composite_key'
-                            )
-                        ]
-                    )
-
-                    machine_id_groups = (
-                        result.filter(result['machine_id_for_dedup'].is_not_null())
-                        .group_by('dedup_composite_key')
-                        .agg([pd.col('host_name').count().alias('count'), pd.col('host_name').first().alias('sample_host')])
-                        .filter(pd.col('count') > 1)
-                    )
-
-                    if len(machine_id_groups) > 0:
-                        # Regroup by machine_id to merge duplicate physical hosts
-                        # Use modified unique index that groups by machine_id instead of job details
-                        from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
-
-                        machine_id_grouped = (
-                            result.filter(result['machine_id_for_dedup'].is_not_null())
-                            .group_by(['dedup_composite_key'])
-                            .agg(
-                                [
-                                    # Numeric aggregations - sum across jobs
-                                    pd.col('task_runs').sum().alias('task_runs'),
-                                    pd.col('host_runs').sum().alias('host_runs'),
-                                    # Timestamp aggregations
-                                    pd.col('first_automation').filter(pd.col('first_automation').is_not_null()).min().alias('first_automation'),
-                                    pd.col('last_automation').filter(pd.col('last_automation').is_not_null()).max().alias('last_automation'),
-                                    pd.col('job_created').filter(pd.col('job_created').is_not_null()).max().alias('job_created'),
-                                    pd.col('managed_node_type').min().alias('managed_node_type'),
-                                    # Take first job_remote_id (doesn't matter which since we're merging)
-                                    pd.col('job_remote_id').first().alias('job_remote_id'),
-                                    pd.col('job_template_name').first().alias('job_template_name'),
-                                    # Aggregate organization information to preserve all unique organizations
-                                    pd.col('organization_name').unique().sort().alias('organizations_list'),
-                                    pd.col('organization_name').first().alias('organization_name'),  # Keep one for schema compatibility
-                                    pd.col('install_uuid').first().alias('install_uuid'),
-                                    # Take first host_name and original_host_name (the merged host will use one of them)
-                                    pd.col('host_name').first().alias('host_name'),
-                                    pd.col('original_host_name').first().alias('original_host_name'),
-                                    # Complex type aggregations - merge canonical facts and facts
-                                    pd.col('canonical_facts')
-                                    .filter(pd.col('canonical_facts').is_not_null())
-                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                                    .first()
-                                    .alias('canonical_facts'),
-                                    pd.col('facts')
-                                    .filter(pd.col('facts').is_not_null())
-                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                                    .first()
-                                    .alias('facts'),
-                                    # Merge collections
-                                    pd.col('managed_node_types_set')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('managed_node_types_set'),
-                                    pd.col('events')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('events'),
-                                    pd.col('host_names_before_dedup')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None and str(item).strip()
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('host_names_before_dedup'),
-                                ]
-                            )
-                        )
-
-                        # Combine the machine_id grouped results with records that don't have machine_id
-                        records_without_machine_id = result.filter(result['machine_id_for_dedup'].is_null()).drop(
-                            ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
-                        )
-
-                        machine_id_grouped = machine_id_grouped.drop('dedup_composite_key')
-
-                        # Ensure both dataframes have the same columns in the same order
-                        all_columns = sorted(set(machine_id_grouped.columns) | set(records_without_machine_id.columns))
-
-                        # Add missing columns to both dataframes
-                        for col in all_columns:
-                            if col not in machine_id_grouped.columns:
-                                # Add missing column with appropriate default value
-                                if col in ['task_runs', 'host_runs', 'job_remote_id']:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit(0).alias(col))
-                                elif col in ['managed_node_types_set', 'events', 'host_names_before_dedup', 'organizations_list']:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit([]).alias(col))
-                                elif col in ['canonical_facts', 'facts']:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit('{}').alias(col))
-                                else:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit(None).alias(col))
-
-                            if col not in records_without_machine_id.columns:
-                                # Add missing column with appropriate default value
-                                if col in ['task_runs', 'host_runs', 'job_remote_id']:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit(0).alias(col))
-                                elif col in ['managed_node_types_set', 'events', 'host_names_before_dedup', 'organizations_list']:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit([]).alias(col))
-                                elif col in ['canonical_facts', 'facts']:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit('{}').alias(col))
-                                else:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit(None).alias(col))
-
-                        # Select columns in the same order
-                        machine_id_grouped = machine_id_grouped.select(all_columns)
-                        records_without_machine_id = records_without_machine_id.select(all_columns)
-
-                        # Concatenate the results
-                        if len(records_without_machine_id) > 0:
-                            result = pd.concat([machine_id_grouped, records_without_machine_id])
-                        else:
-                            result = machine_id_grouped
-
-                    else:
-                        result = result.drop(['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key'])
-
-                except Exception as e:
-                    # Fallback: remove the temporary columns and continue
-                    cols_to_remove = ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
-                    for col in cols_to_remove:
-                        if col in result.columns:
-                            result = result.drop(col)
-
+        result = super().dedup(dataframe, hostname_mapping, scope_dataframe)
+        
+        # DEBUG: Log web01 records after deduplication
+        web01_after = result.filter(pd.col('host_name').str.contains('web01'))
+        if len(web01_after) > 0:
+            print(f"DEBUG DEDUP: web01 records AFTER deduplication ({len(web01_after)} records):")
+            for row in web01_after.iter_rows(named=True):
+                print(f"  {row['host_name']} (orig: {row['original_host_name']}) - job_id: {row['job_remote_id']}")
+            print()
+        
         return result
+

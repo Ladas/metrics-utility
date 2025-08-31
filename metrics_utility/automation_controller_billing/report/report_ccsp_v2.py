@@ -463,6 +463,10 @@ class ReportCCSPv2(Base):
             df = df.sort_values('collection_start_timestamp').reset_index(drop=True)
 
         median_diff = df['time_diff'].median()
+        
+        # Handle case where median_diff is None (all null values in time_diff)
+        if median_diff is None:
+            median_diff = 0  # Use 0 as fallback to avoid TypeError in threshold calculations
 
         dataframe = self.rename_dataframe(
             df,
@@ -524,9 +528,20 @@ class ReportCCSPv2(Base):
         else:
             # Use Polars-compatible groupby without dropna parameter
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
+                # Check if experimental deduplication is enabled and organizations_list is available
+                experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
+                has_organizations_list = 'organizations_list' in dataframe.columns
+                
+                if experimental_dedup and has_organizations_list:
+                    # Use organizations_list length for experimental dedup
+                    organizations_expr = pd.col('organizations_list').list.len().alias('organizations')
+                else:
+                    # Use traditional organization_name count
+                    organizations_expr = pd.col('organization_name').n_unique().alias('organizations')
+                
                 ccsp_report_dataframe = dataframe.group_by('host_name').agg(
                     [
-                        pd.col('organization_name').n_unique().alias('organizations'),
+                        organizations_expr,
                         pd.col('host_name').count().alias('host_runs'),
                         pd.col('task_runs').sum().alias('task_runs'),
                         pd.col('first_automation').min().alias('first_automation'),
@@ -534,13 +549,28 @@ class ReportCCSPv2(Base):
                     ]
                 )
             else:  # pandas DataFrame fallback
-                ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
-                    organizations=('organization_name', 'nunique'),
-                    host_runs=('host_name', 'count'),
-                    task_runs=('task_runs', 'sum'),
-                    first_automation=('first_automation', 'min'),
-                    last_automation=('last_automation', 'max'),
-                )
+                # Check if experimental deduplication is enabled and organizations_list is available
+                experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
+                has_organizations_list = 'organizations_list' in dataframe.columns
+                
+                if experimental_dedup and has_organizations_list:
+                    # Use organizations_list length for experimental dedup
+                    ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
+                        organizations=('organizations_list', lambda x: len(x.iloc[0]) if len(x) > 0 and x.iloc[0] is not None else 0),
+                        host_runs=('host_name', 'count'),
+                        task_runs=('task_runs', 'sum'),
+                        first_automation=('first_automation', 'min'),
+                        last_automation=('last_automation', 'max'),
+                    )
+                else:
+                    # Use traditional organization_name count
+                    ccsp_report_dataframe = dataframe.groupby('host_name', dropna=False).agg(
+                        organizations=('organization_name', 'nunique'),
+                        host_runs=('host_name', 'count'),
+                        task_runs=('task_runs', 'sum'),
+                        first_automation=('first_automation', 'min'),
+                        last_automation=('last_automation', 'max'),
+                    )
 
             # Create dataframe with hostname and orgs as columns, having last automation for each host
             # Use Polars-compatible pivot operation

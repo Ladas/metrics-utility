@@ -54,8 +54,23 @@ def compute_serial(row):
 
     # Extract first value from arrays (or empty string if missing)
     # Handle both list and Series objects
-    serial = ansible_product_serial[0] if (ansible_product_serial is not None and len(ansible_product_serial) > 0) else ''
-    machine_id = ansible_machine_id[0] if (ansible_machine_id is not None and len(ansible_machine_id) > 0) else ''
+    if ansible_product_serial is not None and len(ansible_product_serial) > 0:
+        # If it's a list of strings, take the first element; if it's a string, use it directly
+        if isinstance(ansible_product_serial, list):
+            serial = ansible_product_serial[0] if ansible_product_serial[0] is not None else ''
+        else:
+            serial = str(ansible_product_serial)
+    else:
+        serial = ''
+        
+    if ansible_machine_id is not None and len(ansible_machine_id) > 0:
+        # If it's a list of strings, take the first element; if it's a string, use it directly
+        if isinstance(ansible_machine_id, list):
+            machine_id = ansible_machine_id[0] if ansible_machine_id[0] is not None else ''
+        else:
+            machine_id = str(ansible_machine_id)
+    else:
+        machine_id = ''
 
     if 'web01' in str(row.get('host_name', '')) or 'web01' in str(facts_data):
         print(f"DEBUG COMPUTE_SERIAL: extracted serial='{serial}', machine_id='{machine_id}'")
@@ -286,24 +301,43 @@ class DataframeInventoryScope(Base):
         return ['last_automation', 'canonical_facts', 'facts', 'organizations', 'inventories', 'serials', 'host_names_before_dedup']
 
     @staticmethod
-    def initial_aggregations():
+    def group_aggregations():
         """Define how to aggregate raw CSV data when grouping by unique_index_columns during initial processing.
 
         This is used in the group() method when processing CSV data from a single file/batch.
         For duplicate records with the same unique index, these aggregations combine the data.
 
         Returns:
-            dict: Mapping of column_name -> aggregation_expression for Polars group_by().agg()
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
         """
         return {
             # Data columns aggregation rules for initial CSV processing
-            'last_automation': 'max',  # Latest automation timestamp
-            'canonical_facts': 'first',  # Take first list of facts for single batch processing
-            'facts': 'first',  # Take first list of facts for single batch processing
+            'last_automation': 'max_non_null',  # Latest automation timestamp (null-aware)
+            'canonical_facts': 'merge_json_facts',  # Take first list of facts for single batch processing
+            'facts': 'merge_json_facts',  # Take first list of facts for single batch processing
             'organizations': 'unique',  # Collect unique organization names
             'inventories': 'unique',  # Collect unique inventory names
             'serials': 'unique',  # Collect unique serial numbers
-            'host_names_before_dedup': 'first',  # Single host name initially
+            'host_names_before_dedup': 'unique',  # Collect unique host names during aggregation
+        }
+
+    @staticmethod
+    def regroup_aggregations():
+        """Define how to aggregate rollup data when combining multiple rollup files during regroup operations.
+
+        This is used in the regroup() method when merging pre-aggregated data from different batches/files.
+        
+        Returns:
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
+        """
+        return {
+            'last_automation': 'max_non_null',  # Latest automation timestamp across rollups (null-aware)
+            'canonical_facts': 'merge_json_facts',  # Merge JSON objects from different rollups
+            'facts': 'merge_json_facts',  # Merge JSON objects from different rollups
+            'organizations': 'flatten_unique',  # Flatten and get unique from List columns
+            'inventories': 'flatten_unique',  # Flatten and get unique from List columns
+            'serials': 'flatten_unique',  # Flatten and get unique from List columns
+            'host_names_before_dedup': 'flatten_unique',  # Flatten and get unique from List columns
         }
 
     @staticmethod
@@ -491,7 +525,7 @@ class DataframeInventoryScope(Base):
                 billing_data['canonical_facts']
                 .map_elements(lambda x: compute_serial({'canonical_facts': x}) if x else None, return_dtype=pd.Utf8)
                 .alias('serial'),
-                billing_data['host_name'].alias('host_names_before_dedup'),
+                billing_data['original_host_name'].alias('host_names_before_dedup'),
             ]
         )
 
@@ -542,45 +576,15 @@ class DataframeInventoryScope(Base):
             },
         )
 
-        # Build aggregation expressions based on existing columns after transformation
-        agg_exprs = []
-        initial_aggs = self.initial_aggregations()
-
-        for final_col in self.data_columns():
-            agg_rule = initial_aggs.get(final_col)
-
-            # All columns should exist directly on the dataframe after transformation
-            if agg_rule == 'max':
-                agg_exprs.append(pd.col(final_col).max().alias(final_col))
-            elif agg_rule == 'first_non_null':
-                agg_exprs.append(pd.col(final_col).filter(pd.col(final_col).is_not_null()).first().alias(final_col))
-            elif agg_rule == 'combine_json_values':
-                # For columns like canonical_facts and facts that need JSON merging
-                # Collect all values for later processing
-                print(f'===== GROUP AGGREGATION: Adding combine_json_values for {final_col} =====')
-                agg_exprs.append(pd.col(final_col).filter(pd.col(final_col).is_not_null()).alias(f'{final_col}_list'))
-            elif agg_rule == 'first':
-                agg_exprs.append(pd.col(final_col).first().alias(final_col))
-            elif agg_rule == 'unique':
-                # For String columns that were transformed from CSV (organizations, inventories, serials)
-                # collect all non-null/non-empty values and create proper Lists with unique values
-                if final_col in ['organizations', 'inventories', 'serials']:
-                    # Use Polars' proper aggregation syntax to collect unique values into a list
-                    # In groupby context, we need to collect all values then get unique
-                    agg_exprs.append(
-                        pd.col(final_col).filter((pd.col(final_col).is_not_null()) & (pd.col(final_col) != '')).unique().alias(final_col)
-                    )
-                else:
-                    # For other columns, use standard unique aggregation
-                    agg_exprs.append(
-                        pd.col(final_col).filter((pd.col(final_col).is_not_null()) & (pd.col(final_col) != '')).unique().alias(final_col)
-                    )
-            elif agg_rule == 'collect_unique_as_json_set':
-                # Collect unique values as a List (will be converted to JSON later)
-                agg_exprs.append(pd.col(final_col).filter((pd.col(final_col).is_not_null()) & (pd.col(final_col) != '')).unique().alias(final_col))
-            else:
-                # Default to first() for unspecified columns
-                agg_exprs.append(pd.col(final_col).first().alias(final_col))
+        # Use centralized aggregation system from base class
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build aggregation expressions using centralized system
+        agg_exprs = build_aggregation_expressions(self.group_aggregations())
+        
+        print(f'===== GROUP AGGREGATION: Using centralized system with {len(agg_exprs)} expressions =====')
+        for expr in agg_exprs:
+            print(f'  - {expr}')
 
         print(f'===== GROUP BEFORE AGGREGATION: {len(agg_exprs)} aggregation expressions =====')
 
@@ -705,22 +709,14 @@ class DataframeInventoryScope(Base):
 
         print('===== REGROUP AGGREGATION START =====')
 
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-            [
-                # Use native List concatenation and flattening for all collections
-                # Since these columns are already Lists, we need to flatten and dedupe
-                pd.col('organizations').flatten().unique().alias('organizations'),
-                pd.col('inventories').flatten().unique().alias('inventories'),
-                pd.col('serials').flatten().unique().alias('serials'),
-                pd.col('host_names_before_dedup').flatten().unique().alias('host_names_before_dedup'),
-                # Use custom merging for JSON objects that need to be combined
-                # These need special handling to merge the JSON objects properly
-                pd.col('canonical_facts').alias('canonical_facts_list'),
-                pd.col('facts').alias('facts_list'),
-                # Simple aggregation
-                pd.col('last_automation').max().alias('last_automation'),
-            ]
-        )
+        # Use centralized aggregation system for regroup operations
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build regroup aggregation expressions using centralized system
+        regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
+        print(f'===== REGROUP AGGREGATION: Using centralized system with {len(regroup_exprs)} expressions =====')
+        
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
 
         print(f'===== REGROUP AFTER AGGREGATION =====')
         print(f'===== REGROUP OUTPUT SCHEMA: {result.schema} =====')
@@ -781,664 +777,3 @@ class DataframeInventoryScope(Base):
 
         return result
 
-    @staticmethod
-    def unique_index_columns():
-        """Define columns that uniquely identify a record for grouping/deduplication."""
-        return ['host_name', 'install_uuid']
-
-    @staticmethod
-    def data_columns():
-        """Define data columns that need aggregation when grouping records."""
-        return ['last_automation', 'organizations', 'inventories', 'canonical_facts', 'facts', 'serials', 'host_names_before_dedup']
-
-    @staticmethod
-    def initial_aggregations():
-        """Define how to aggregate raw CSV data when grouping by unique_index_columns during initial processing.
-
-        This is used in the group() method when processing CSV data from a single file/batch.
-        For duplicate records with the same unique index, these aggregations combine the data.
-
-        Returns:
-            dict: Mapping of column_name -> aggregation_expression for Polars group_by().agg()
-        """
-        return {
-            # Data columns aggregation rules for initial CSV processing
-            'last_automation': 'max',  # Take latest automation time
-            'organizations': 'collect_unique_as_json_set',  # Collect unique organization names into JSON set
-            'inventories': 'collect_unique_as_json_set',  # Collect unique inventory names into JSON set
-            'canonical_facts': 'combine_json_values',  # Combine JSON objects with arrays as values
-            'facts': 'combine_json_values',  # Combine JSON objects with arrays as values
-            'serials': 'collect_unique_as_json_set',  # Collect unique serials into JSON set
-            'host_names_before_dedup': 'first',  # Should be same for duplicates within same batch
-        }
-
-    @staticmethod
-    def collector_schema() -> pa.Schema:
-        """Define PyArrow schema for raw CSV collector data validation.
-
-        This schema is used for validating main_host CSV data during initial
-        collection and processing. It includes all columns that may appear in the
-        raw CSV files for inventory scope tracking.
-
-        Returns:
-            PyArrow schema for collector data validation
-        """
-        return pa.schema(
-            [
-                # Index columns (unique identifiers)
-                pa.field('host_name', pa.string()),
-                pa.field('install_uuid', pa.string()),
-                # Raw CSV data columns (before aggregation)
-                pa.field('last_automation', pa.string()),  # Keep as string for Polars compatibility
-                pa.field('organization_name', pa.string()),
-                pa.field('inventory_name', pa.string()),
-                pa.field('ansible_host_variable', pa.string()),  # Host variable mapping for deduplication
-                # Complex data columns (stored as JSON strings)
-                pa.field('canonical_facts', pa.string()),  # JSON string for dynamic dictionary content
-                pa.field('facts', pa.string()),  # JSON string for dynamic dictionary content
-                pa.field('host_names_before_dedup', pa.string()),  # Store as string for dedup tracking
-                # Calculated columns
-                pa.field('organizations', pa.string()),  # JSON array string
-                pa.field('inventories', pa.string()),  # JSON array string
-                pa.field('serials', pa.string()),  # JSON array string
-            ]
-        )
-
-    @staticmethod
-    def parquet_schema() -> pa.Schema:
-        """Define PyArrow schema for aggregated rollup data validation.
-
-        This schema is used for validating aggregated inventory scope data during
-        rollup merging operations. It includes only the final aggregated columns
-        after group_by operations.
-
-        Returns:
-            PyArrow schema for rollup data validation
-        """
-        return pa.schema(
-            [
-                # Index columns (unique identifiers)
-                pa.field('host_name', pa.string()),
-                pa.field('install_uuid', pa.string()),
-                # Aggregated data columns
-                pa.field('last_automation', pa.timestamp('us')),  # Proper timestamp for datetime data
-                # Complex aggregated data (JSON strings for merging compatibility)
-                pa.field('organizations', pa.string()),  # JSON array string
-                pa.field('inventories', pa.string()),  # JSON array string
-                pa.field('canonical_facts', pa.string()),  # JSON object string
-                pa.field('facts', pa.string()),  # JSON object string
-                pa.field('serials', pa.string()),  # JSON array string
-                pa.field('host_names_before_dedup', pa.string()),  # JSON array string
-            ]
-        )
-
-    def get_collector_default_values(self) -> Dict[str, Any]:
-        """Get custom default values for collector schema columns.
-
-        These defaults override the standard type-based defaults for domain-specific
-        requirements for inventory scope processing.
-
-        Returns:
-            Dictionary mapping column names to custom default values
-        """
-        return {
-            'host_name': '',
-            'install_uuid': '',
-            'last_automation': '',
-            'organization_name': '',
-            'inventory_name': '',
-            'canonical_facts': '{}',  # Empty JSON object
-            'facts': '{}',  # Empty JSON object
-            'host_names_before_dedup': '',  # Empty string for single host tracking
-            'organizations': '[]',  # Empty JSON array
-            'inventories': '[]',  # Empty JSON array
-            'serials': '[]',  # Empty JSON array
-        }
-
-    def get_rollup_default_values(self) -> Dict[str, Any]:
-        """Get custom default values for rollup schema columns.
-
-        Returns:
-            Dictionary mapping column names to custom default values
-        """
-        return {
-            'host_name': '',
-            'install_uuid': '',
-            'last_automation': '',
-            'organizations': '[]',  # Empty JSON array
-            'inventories': '[]',  # Empty JSON array
-            'canonical_facts': '{}',  # Empty JSON object
-            'facts': '{}',  # Empty JSON object
-            'serials': '[]',  # Empty JSON array
-            'host_names_before_dedup': '[]',  # Empty JSON array for dedup tracking
-        }
-
-    @staticmethod
-    def operations():
-        """Define how to merge rollup data when combining multiple rollup files.
-
-        This is used by the summarize_merged_dataframes() method in the base class
-        when resolving conflicts from join operations during rollup merging.
-
-        Returns:
-            dict: Mapping of column_name -> operation for resolving merge conflicts
-
-        Valid operations:
-            - 'min', 'max': Take minimum/maximum value
-            - 'sum': Add values together
-            - 'combine_set': Merge JSON set strings by union
-            - 'combine_json_values': Merge JSON object strings by combining field values
-        """
-        return {
-            # Index columns - should be identical but use min as safe fallback
-            'host_name': 'min',
-            'install_uuid': 'min',
-            # Data columns
-            'last_automation': 'max',
-            'organizations': 'combine_set',
-            'inventories': 'combine_set',
-            'canonical_facts': 'combine_json_values',
-            'facts': 'combine_json_values',
-            'serials': 'combine_set',
-            'host_names_before_dedup': 'combine_set',
-        }
-
-    def _combine_json_values_in_group(self, json_list, column_name):
-        """Combine JSON values during initial group() aggregation.
-
-        This handles the transformation from individual JSON objects to merged objects
-        with arrays as values during the initial CSV processing aggregation.
-
-        Args:
-            json_list: Polars Series/List containing JSON strings from group aggregation
-            column_name: Name of the column being processed (for debugging)
-
-        Returns:
-            JSON string with merged values as arrays
-        """
-        import json
-        from metrics_utility.automation_controller_billing.dataframe_engine.base import combine_json_values
-
-        print(f'!!!!! _combine_json_values_in_group called for {column_name} - this means combine_json_values aggregation is working !!!!!')
-        print(f'DEBUG: Input type: {type(json_list)}')
-
-        # Handle None or empty input
-        if json_list is None:
-            print(f'DEBUG: {column_name} json_list is None, returning empty dict')
-            return '{}'
-
-        # Convert Polars Series to Python list if needed
-        if hasattr(json_list, 'to_list'):
-            json_list = json_list.to_list()
-            print(f'DEBUG: {column_name} converted to list: {json_list}')
-
-        if not json_list:
-            print(f'DEBUG: {column_name} json_list is empty, returning empty dict')
-            return '{}'
-
-        merged_dict = {}
-
-        # Process each JSON string in the list
-        for i, json_str in enumerate(json_list):
-            print(f'DEBUG: {column_name} processing item {i}: {json_str} (type: {type(json_str)})')
-
-            if json_str is None or json_str == '':
-                continue
-
-            try:
-                parsed = json.loads(json_str)
-                print(f'DEBUG: {column_name} parsed JSON {i}: {parsed}')
-
-                if isinstance(parsed, dict):
-                    # Filter out null values
-                    clean_dict = {k: v for k, v in parsed.items() if v is not None and v != 'null' and v != 'NA'}
-                    print(f'DEBUG: {column_name} clean dict {i}: {clean_dict}')
-
-                    if clean_dict:  # Only merge if there are valid values
-                        merged_dict = combine_json_values(merged_dict, clean_dict)
-                        print(f'DEBUG: {column_name} merged_dict after {i}: {merged_dict}')
-
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f'DEBUG: {column_name} JSON decode error for item {i}: {e}')
-                continue
-
-        # Convert sets to sorted lists before JSON serialization
-        for key in merged_dict:
-            if isinstance(merged_dict[key], set):
-                merged_dict[key] = sorted(list(merged_dict[key]))
-
-        result = json.dumps(merged_dict)
-        print(f'DEBUG: {column_name} final result: {result}')
-        return result
-
-    def _merge_json_facts_list(self, json_list):
-        """Merge a list of JSON objects into a single JSON object with arrays as values.
-
-        This is used for combining canonical_facts and facts columns during aggregation.
-        Each key in the resulting object will contain an array of all unique values
-        from the input JSON objects.
-
-        Args:
-            json_list: Polars Series containing Lists of JSON strings from aggregation
-
-        Returns:
-            JSON string (not wrapped in a list)
-        """
-        import json
-        from metrics_utility.automation_controller_billing.dataframe_engine.base import combine_json_values
-
-        print(f'!!!!! _merge_json_facts_list called with: {json_list} (type: {type(json_list)}) !!!!!')
-
-        # Handle None or empty input
-        if json_list is None:
-            print('!!!!! Returning empty dict for None input !!!!!')
-            return '{}'
-
-        # Convert Polars Series to Python list if needed
-        if hasattr(json_list, 'to_list'):
-            json_list = json_list.to_list()
-            print(f'!!!!! Converted to list: {json_list} !!!!!')
-
-        if not json_list:
-            print('!!!!! Returning empty dict for empty list !!!!!')
-            return '{}'
-
-        merged_dict = {}
-
-        # Process each item in the list (each item is a List containing JSON strings)
-        for i, item in enumerate(json_list):
-            print(f'!!!!! Processing item {i}: {item} (type: {type(item)}) !!!!!')
-
-            if item is None:
-                continue
-
-            # Each item is a List of JSON strings
-            if isinstance(item, list):
-                print(f'!!!!! Item {i} is a list with {len(item)} elements !!!!!')
-                for j, json_str in enumerate(item):
-                    print(f'!!!!! Processing sub-item {i}.{j}: {json_str} !!!!!')
-                    if json_str is None or json_str == '':
-                        continue
-                    try:
-                        parsed = json.loads(json_str)
-                        print(f'!!!!! Parsed {i}.{j}: {parsed} !!!!!')
-                        if isinstance(parsed, dict):
-                            # Filter out null values and 'NA' values when combining
-                            clean_dict = {k: v for k, v in parsed.items() if v is not None and v != 'null' and v != 'NA'}
-                            print(f'!!!!! Clean dict {i}.{j}: {clean_dict} !!!!!')
-                            if clean_dict:  # Only merge if there are valid values
-                                merged_dict = combine_json_values(merged_dict, clean_dict)
-                                print(f'!!!!! Merged dict after {i}.{j}: {merged_dict} !!!!!')
-                    except (json.JSONDecodeError, TypeError) as e:
-                        print(f'!!!!! JSON decode error for {i}.{j}: {e} !!!!!')
-                        continue
-            elif isinstance(item, str):
-                # Handle direct JSON string format
-                print(f'!!!!! Item {i} is a string: {item} !!!!!')
-                try:
-                    parsed = json.loads(item)
-                    if isinstance(parsed, dict):
-                        clean_dict = {k: v for k, v in parsed.items() if v is not None and v != 'null'}
-                        if clean_dict:
-                            merged_dict = combine_json_values(merged_dict, clean_dict)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-        # Convert sets to sorted lists for consistent output
-        result_dict = {}
-        for key, values in merged_dict.items():
-            if isinstance(values, set):
-                result_dict[key] = sorted(list(values))
-            else:
-                result_dict[key] = values
-
-        # Return as a JSON string (not wrapped in a list)
-        return json.dumps(result_dict)
-
-    def merge(self, rollup, new_group):
-        """Override merge to ensure serials are computed for rollup data."""
-        # Call the base class merge first
-        result = super().merge(rollup, new_group)
-
-        # Check if we have canonical_facts but empty serials and compute them
-        if result is not None and len(result) > 0 and 'canonical_facts' in result.columns and 'serials' in result.columns:
-            # Check if any serials are missing (empty lists)
-            has_empty_serials = False
-            for row in result.iter_rows(named=True):
-                if row.get('serials') is None or (isinstance(row.get('serials'), list) and len(row.get('serials')) == 0):
-                    has_empty_serials = True
-                    break
-
-            if has_empty_serials:
-                print('DEBUG MERGE: Found empty serials in rollup data, computing them...')
-                # Recompute serials for all rows
-                result = result.with_columns(
-                    [
-                        result['canonical_facts']
-                        .map_elements(lambda x: compute_serial({'canonical_facts': x}) if x else None, return_dtype=pd.Utf8)
-                        .alias('serial')
-                    ]
-                )
-
-                # Convert serial back to serials list format to match expected schema
-                result = result.with_columns(
-                    [result['serial'].map_elements(lambda x: [x] if x is not None else [], return_dtype=pd.List(pd.Utf8)).alias('serials')]
-                )
-
-                # Remove the temporary serial column
-                result = result.drop('serial')
-
-                print(f'DEBUG MERGE: Recomputed serials for {len(result)} records')
-
-        return result
-
-    def load_from_parquet(self, parquet_path):
-        """Override load_from_parquet to compute missing serials for rollup data."""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        # Call the base class method first
-        df = super().load_from_parquet(parquet_path)
-
-        if df is None or len(df) == 0:
-            return df
-
-        # Check if we have canonical_facts but empty serials and compute them
-        if 'canonical_facts' in df.columns and 'serials' in df.columns:
-            # Check if any serials are missing (empty lists)
-            has_empty_serials = False
-            for row in df.iter_rows(named=True):
-                serials = row.get('serials')
-                if serials is None or (isinstance(serials, list) and len(serials) == 0):
-                    has_empty_serials = True
-                    break
-
-            if has_empty_serials:
-                print(f'DEBUG INVENTORY LOAD_FROM_PARQUET: Found empty serials in {parquet_path}, computing them...')
-
-                # Recompute serials for all rows
-                df = df.with_columns(
-                    [
-                        df['canonical_facts']
-                        .map_elements(lambda x: compute_serial({'canonical_facts': x}) if x else None, return_dtype=pd.Utf8)
-                        .alias('serial')
-                    ]
-                )
-
-                # Convert serial back to serials list format to match expected schema
-                df = df.with_columns(
-                    [df['serial'].map_elements(lambda x: [x] if x is not None else [], return_dtype=pd.List(pd.Utf8)).alias('serials')]
-                )
-
-                # Remove the temporary serial column
-                df = df.drop('serial')
-
-                print(f'DEBUG INVENTORY LOAD_FROM_PARQUET: Recomputed serials for {len(df)} records')
-
-        return df
-
-    @traced_method('inventory_scope.build_group')
-    def build_group(self, batch_data):
-        """Build Inventory Scope dataframe group from a single tarball's CSV data.
-
-        Args:
-            batch_data: Data from a single tarball extraction
-                       Format: {'main_host': DataFrame, 'main_jobevent': DataFrame, ...}
-        """
-        # Get main_host data from this batch
-        billing_data = batch_data.get('main_host')
-        if billing_data is None or len(billing_data) == 0:
-            return self.empty()
-
-        # Process the single batch using existing logic
-        processed_data = self._process_batch_inventory(billing_data, batch_data, trace.get_current_span(), None)
-        return self.group(processed_data) if processed_data is not None else self.empty()
-
-    def dedup(self, dataframe, hostname_mapping=None, scope_dataframe=None):
-        """
-        Override dedup method to handle experimental deduplication for inventory scope.
-        This ensures the same machine_id-based deduplication logic is applied to scope data.
-        """
-        if dataframe is None or len(dataframe) == 0:
-            return self.empty()
-
-        # Check if experimental deduplication is enabled
-        experimental_dedup = self.extra_params.get('deduplicator') == 'ccsp-experimental'
-
-        # Call the parent dedup method first to handle hostname-based deduplication
-        if hostname_mapping:
-            result = super().dedup(dataframe, hostname_mapping)
-        else:
-            result = dataframe
-
-        # Additional step for experimental deduplication: merge records with same machine_id AND product_serial
-        if experimental_dedup and result is not None and len(result) > 0:
-            # Parse canonical_facts to extract machine_id and product_serial for grouping
-            if 'canonical_facts' in result.columns:
-                try:
-                    # Add machine_id and product_serial columns for grouping
-                    def extract_machine_id(canonical_facts_json):
-                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
-                            return None
-                        try:
-                            import json
-
-                            facts_dict = json.loads(canonical_facts_json)
-                            machine_ids = facts_dict.get('ansible_machine_id', [])
-                            if isinstance(machine_ids, list) and machine_ids:
-                                return machine_ids[0]  # Take first machine_id
-                            return None
-                        except:
-                            return None
-
-                    def extract_product_serial(canonical_facts_json):
-                        if canonical_facts_json is None or canonical_facts_json == '{}' or canonical_facts_json == '':
-                            return None
-                        try:
-                            import json
-
-                            facts_dict = json.loads(canonical_facts_json)
-                            serials = facts_dict.get('ansible_product_serial', [])
-                            if isinstance(serials, list) and serials:
-                                return serials[0]  # Take first serial
-                            return None
-                        except:
-                            return None
-
-                    result = result.with_columns(
-                        [
-                            result['canonical_facts'].map_elements(extract_machine_id, return_dtype=pd.String).alias('machine_id_for_dedup'),
-                            result['canonical_facts'].map_elements(extract_product_serial, return_dtype=pd.String).alias('product_serial_for_dedup'),
-                        ]
-                    )
-
-                    # Create a composite key for deduplication: machine_id + serial only
-                    result = result.with_columns(
-                        [
-                            (pd.col('machine_id_for_dedup').fill_null('') + '__' + pd.col('product_serial_for_dedup').fill_null('')).alias(
-                                'dedup_composite_key'
-                            )
-                        ]
-                    )
-
-                    # Check for hosts with same composite key (machine_id + product_serial)
-                    machine_id_groups = (
-                        result.filter(result['machine_id_for_dedup'].is_not_null())
-                        .group_by('dedup_composite_key')
-                        .agg([pd.col('host_name').count().alias('count'), pd.col('host_name').first().alias('sample_host')])
-                        .filter(pd.col('count') > 1)
-                    )
-
-                    if len(machine_id_groups) > 0:
-                        # Regroup by composite key to merge duplicate physical hosts in inventory scope
-                        from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
-
-                        machine_id_grouped = (
-                            result.filter(result['machine_id_for_dedup'].is_not_null())
-                            .group_by(['organization_name', 'install_uuid', 'dedup_composite_key'])
-                            .agg(
-                                [
-                                    # Take first host_name and original_host_name (the merged host will use one of them)
-                                    pd.col('host_name').first().alias('host_name'),
-                                    # Timestamp aggregations
-                                    pd.col('last_automation').filter(pd.col('last_automation').is_not_null()).max().alias('last_automation'),
-                                    # Complex type aggregations - merge canonical facts and facts
-                                    pd.col('canonical_facts')
-                                    .filter(pd.col('canonical_facts').is_not_null())
-                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                                    .first()
-                                    .alias('canonical_facts'),
-                                    pd.col('facts')
-                                    .filter(pd.col('facts').is_not_null())
-                                    .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                                    .first()
-                                    .alias('facts'),
-                                    # Merge collections using the same pattern as job host summary
-                                    pd.col('organizations')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('organizations'),
-                                    pd.col('inventories')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('inventories'),
-                                    pd.col('serials')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('serials'),
-                                    pd.col('host_names_before_dedup')
-                                    .map_batches(
-                                        lambda s: pd.Series(
-                                            [
-                                                sorted(
-                                                    list(
-                                                        set(
-                                                            [
-                                                                str(item)
-                                                                for sublist in s.to_list()
-                                                                if sublist is not None
-                                                                for item in (sublist if isinstance(sublist, list) else [sublist])
-                                                                if item is not None
-                                                            ]
-                                                        )
-                                                    )
-                                                )
-                                            ]
-                                        ),
-                                        return_dtype=pd.List(pd.Utf8),
-                                    )
-                                    .first()
-                                    .alias('host_names_before_dedup'),
-                                ]
-                            )
-                        )
-
-                        # Combine the machine_id grouped results with records that don't have machine_id
-                        records_without_machine_id = result.filter(result['machine_id_for_dedup'].is_null()).drop(
-                            ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
-                        )
-
-                        machine_id_grouped = machine_id_grouped.drop('dedup_composite_key')
-
-                        # Ensure both dataframes have the same columns in the same order
-                        all_columns = sorted(set(machine_id_grouped.columns) | set(records_without_machine_id.columns))
-
-                        # Add missing columns to both dataframes
-                        for col in all_columns:
-                            if col not in machine_id_grouped.columns:
-                                # Add missing column with appropriate default value
-                                if col in ['organizations', 'inventories', 'serials', 'host_names_before_dedup']:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit([]).alias(col))
-                                elif col in ['canonical_facts', 'facts']:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit('{}').alias(col))
-                                else:
-                                    machine_id_grouped = machine_id_grouped.with_columns(pd.lit(None).alias(col))
-
-                            if col not in records_without_machine_id.columns:
-                                # Add missing column with appropriate default value
-                                if col in ['organizations', 'inventories', 'serials', 'host_names_before_dedup']:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit([]).alias(col))
-                                elif col in ['canonical_facts', 'facts']:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit('{}').alias(col))
-                                else:
-                                    records_without_machine_id = records_without_machine_id.with_columns(pd.lit(None).alias(col))
-
-                        # Select columns in the same order
-                        machine_id_grouped = machine_id_grouped.select(all_columns)
-                        records_without_machine_id = records_without_machine_id.select(all_columns)
-
-                        # Concatenate the results
-                        if len(records_without_machine_id) > 0:
-                            result = pd.concat([machine_id_grouped, records_without_machine_id])
-                        else:
-                            result = machine_id_grouped
-
-                    else:
-                        result = result.drop(['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key'])
-
-                except Exception as e:
-                    # Fallback: remove the temporary columns and continue
-                    cols_to_remove = ['machine_id_for_dedup', 'product_serial_for_dedup', 'dedup_composite_key']
-                    for col in cols_to_remove:
-                        if col in result.columns:
-                            result = result.drop(col)
-
-        return result

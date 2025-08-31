@@ -101,9 +101,23 @@ The rollups data flow follows a strict 10-stage pipeline that separates concerns
 - **Aggregation Logic**: Same as Stage 4 - native type merging operations
 - **Purpose**: Combine daily rollups across date ranges for comprehensive reporting
 
-### Stage 10: Report Sheet Generation
+### Stage 10: Experimental Deduplication Enrichment
+- **Operation**: Enrich canonical facts during experimental deduplication
+- **Input Schema**: `dataframe_schema()` types from Stage 9
+- **Output Schema**: `dataframe_schema()` types (same structure, enriched data)
+- **Exact Operation**: `dedup(dataframe, hostname_mapping, scope_dataframe)`
+- **Enrichment Logic**:
+  - Extract canonical facts from scope_dataframe (inventory scope data)
+  - Convert JSON strings to native List format via `convert_json_to_list_pairs()`
+  - Join enriched facts to job_host_summary direct managed nodes
+  - Apply hostname mapping for deduplication after enrichment
+  - Maintain native List types throughout per `dataframe_schema()`
+- **Purpose**: Enrich direct managed nodes with canonical facts before hostname deduplication
+- **Conditional**: Only applies when `METRICS_UTILITY_DEDUPLICATOR='ccsp-experimental'`
+
+### Stage 11: Report Sheet Generation
 - **Operation**: Generate XLSX sheets via specialized group-by aggregations
-- **Input Schema**: `dataframe_schema()` (native types from Stage 9)
+- **Input Schema**: `dataframe_schema()` (native types from Stage 10/11)
 - **Output Schema**: Report-specific aggregated DataFrames (optimized for XLSX)
 - **Exact Operation**: `df.group_by(report_columns).agg(report_specific_aggregations())`
 - **Aggregation Examples**:
@@ -297,7 +311,7 @@ def convert_dict_to_json(native_dict):
 
 ## Type Flow Summary
 
-### Complete 10-Stage Pipeline Flow
+### Complete 11-Stage Pipeline Flow
 
 ```
 ROLLUP GENERATION PIPELINE:
@@ -321,7 +335,9 @@ Stage 8: Parquet to Working Schema Conversion
          ↓ parquet_schema() → dataframe_schema()
 Stage 9: Multi-File Rollup Merging
          ↓ concat + regroup with native types
-Stage 10: Report Sheet Generation
+Stage 10: Experimental Deduplication Enrichment
+         ↓ canonical facts enrichment + hostname deduplication
+Stage 11: Report Sheet Generation
          ↓ group_by.agg for XLSX sheets
 ```
 

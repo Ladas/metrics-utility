@@ -122,16 +122,12 @@ class DataframeCollectionStatus(Base):
         if dataframe is None or len(dataframe) == 0:
             return self.empty()
 
-        # Use proper aggregation based on initial_aggregations() method to avoid data loss
-        # Build aggregation expressions based on the defined aggregation rules
-        agg_exprs = []
-        initial_aggs = self.initial_aggregations()
-
-        for col in self.data_columns():
-            agg_rule = initial_aggs.get(col)
-            if agg_rule == 'sum':
-                agg_exprs.append(pd.col(col).sum().alias(col))
-
+        # Use centralized aggregation system from base class
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build aggregation expressions using centralized system
+        agg_exprs = build_aggregation_expressions(self.group_aggregations())
+        
         group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
 
         # Schema application will be handled by base class _group_with_schema
@@ -155,11 +151,13 @@ class DataframeCollectionStatus(Base):
             },
         )
 
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(
-            [
-                pd.col('elapsed').sum().alias('elapsed'),  # Sum elapsed time across dates
-            ]
-        )
+        # Use centralized aggregation system for regroup operations
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
+        
+        # Build regroup aggregation expressions using centralized system
+        regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
+        
+        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0
@@ -190,18 +188,31 @@ class DataframeCollectionStatus(Base):
         return ['elapsed']
 
     @staticmethod
-    def initial_aggregations():
+    def group_aggregations():
         """Define how to aggregate raw CSV data when grouping by unique_index_columns during initial processing.
 
         This is used in the group() method when processing CSV data from a single file/batch.
         For duplicate records with the same unique index, these aggregations combine the data.
 
         Returns:
-            dict: Mapping of column_name -> aggregation_expression for Polars group_by().agg()
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
         """
         return {
             # Data columns aggregation rules for initial CSV processing
             'elapsed': 'sum',  # Sum elapsed time across duplicate records
+        }
+
+    @staticmethod
+    def regroup_aggregations():
+        """Define how to aggregate rollup data when combining multiple rollup files during regroup operations.
+
+        This is used in the regroup() method when merging pre-aggregated data from different batches/files.
+        
+        Returns:
+            dict: Mapping of column_name -> aggregation_name for centralized aggregation system
+        """
+        return {
+            'elapsed': 'sum',  # Sum elapsed time across rollups
         }
 
     @staticmethod

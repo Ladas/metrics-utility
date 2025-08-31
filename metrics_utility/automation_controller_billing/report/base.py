@@ -507,7 +507,7 @@ class Base:
             # Use Polars groupby - simplified to avoid complex field issues
             agg_exprs = [
                 pd.col('organization_name').n_unique().alias('organizations'),
-                pd.col('host_runs').sum().alias('host_runs'),  # Sum host_runs to get total job instances
+                pd.col('host_name').count().alias('host_runs'),  # Count records per host (each record = one host-job combination)
                 pd.col('task_runs').sum().alias('task_runs'),
                 pd.col('first_automation').min().alias('first_automation'),
                 pd.col('last_automation').max().alias('last_automation'),
@@ -519,7 +519,7 @@ class Base:
                 if 'managed_node_types_set' in dataframe.columns:
                     agg_exprs.append(pd.col('managed_node_types_set').first().alias('managed_node_types_set_list'))
                 if 'events' in dataframe.columns:
-                    agg_exprs.append(pd.col('events').first().alias('events_list'))
+                    agg_exprs.append(pd.col('events').first().alias('events'))
                 if 'canonical_facts' in dataframe.columns:
                     # Use proper merging for canonical facts instead of first() to preserve deduplicated data
                     from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
@@ -548,7 +548,13 @@ class Base:
 
             # Add dedup aggregation if enabled
             if self.has_dedup_enabled():
-                agg_exprs.append(pd.col('host_names_before_dedup').first().alias('host_names_before_dedup'))
+                # Use simpler aggregation for host_names_before_dedup - just collect all non-null lists
+                agg_exprs.append(
+                    pd.col('host_names_before_dedup')
+                    .filter(pd.col('host_names_before_dedup').is_not_null())
+                    .first()
+                    .alias('host_names_before_dedup')
+                )
 
             ccsp_report_dataframe = dataframe.group_by('host_name').agg(agg_exprs)
 
@@ -566,9 +572,9 @@ class Base:
                 else:
                     complex_columns.append(pd.lit([]).alias('managed_node_types_set'))
 
-                if 'events_list' in ccsp_report_dataframe.columns:
+                if 'events' in ccsp_report_dataframe.columns:
                     complex_columns.append(
-                        ccsp_report_dataframe['events_list']
+                        ccsp_report_dataframe['events']
                         .map_elements(lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object)
                         .alias('events')
                     )
@@ -607,7 +613,7 @@ class Base:
 
             # Drop the temporary list columns safely
             cols_to_drop = []
-            for col in ['managed_node_types_set_list', 'events_list', 'canonical_facts_list', 'facts_list']:
+            for col in ['managed_node_types_set', 'events', 'canonical_facts_list', 'facts_list']:
                 if col in ccsp_report_dataframe.columns:
                     cols_to_drop.append(col)
             if cols_to_drop:

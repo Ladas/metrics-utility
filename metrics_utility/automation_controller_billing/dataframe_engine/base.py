@@ -48,6 +48,167 @@ from metrics_utility.tracing import add_span_attributes, traced_method
 logger = logging.getLogger(__name__)
 
 
+# ========================================
+# CENTRALIZED AGGREGATION EXPRESSIONS
+# ========================================
+# Define all aggregation patterns in one place for consistency across dataframe engines
+
+def get_aggregation_expressions() -> Dict[str, Any]:
+    """Define all available aggregation expressions for Polars group_by().agg() operations.
+    
+    This centralized system ensures consistent aggregation behavior across all dataframe engines.
+    Each dataframe engine can reference these by name in their initial_aggregations() method.
+    
+    Returns:
+        Dictionary mapping aggregation names to Polars expressions
+    """
+    return {
+        # ========================================
+        # NUMERIC AGGREGATIONS
+        # ========================================
+        'sum': lambda col: pd.col(col).sum().alias(col),
+        'count': lambda col: pd.col(col).count().alias(col),
+        'max': lambda col: pd.col(col).max().alias(col),
+        'min': lambda col: pd.col(col).min().alias(col),
+        'first': lambda col: pd.col(col).first().alias(col),
+        'last': lambda col: pd.col(col).last().alias(col),
+        
+        # ========================================
+        # NULL-AWARE AGGREGATIONS
+        # ========================================
+        'first_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).first().alias(col),
+        'last_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).last().alias(col),
+        'max_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).max().alias(col),
+        'min_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).min().alias(col),
+        
+        # ========================================
+        # LIST/COLLECTION AGGREGATIONS
+        # ========================================
+        'unique': lambda col: pd.col(col).filter((pd.col(col).is_not_null()) & (pd.col(col) != '')).unique().alias(col),
+        'unique_non_empty': lambda col: pd.col(col).filter((pd.col(col).is_not_null()) & (pd.col(col) != '')).unique().alias(col),
+        'collect_list': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).alias(col),
+        'flatten_unique': lambda col: pd.col(col).flatten().unique().alias(col),
+        'collect_list_safe': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).alias(col),
+        
+        # ========================================
+        # JSON AGGREGATIONS
+        # ========================================
+        'combine_json_values': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).alias(f'{col}_list'),
+        'collect_unique_as_json_set': lambda col: pd.col(col).filter((pd.col(col).is_not_null()) & (pd.col(col) != '')).unique().alias(col),
+        
+        # ========================================
+        # SPECIAL AGGREGATIONS FOR HOST TRACKING
+        # ========================================
+        'original_host_names': lambda col: pd.col('original_host_name').unique().alias(col),
+        'host_names_from_original': lambda col: pd.col('original_host_name').unique().alias(col),
+        
+        # ========================================
+        # COMPLEX AGGREGATIONS
+        # ========================================
+        'merge_lists_unique': lambda col: (
+            pd.col(col)
+            .map_batches(
+                lambda s: pd.Series([
+                    sorted(list(set([
+                        str(item)
+                        for sublist in s.to_list()
+                        if sublist is not None
+                        for item in (sublist if isinstance(sublist, list) else [sublist])
+                        if item is not None
+                    ])))
+                ]),
+                return_dtype=pd.List(pd.Utf8),
+            )
+            .first()
+            .alias(col)
+        ),
+        
+        # ========================================
+        # ADVANCED LIST OPERATIONS
+        # ========================================
+        'flatten_unique': lambda col: pd.col(col).flatten().unique().alias(col),
+        
+        # ========================================
+        # SPECIALIZED AGGREGATIONS FOR FACTS AND COMPLEX DATA
+        # ========================================
+        'merge_json_facts': lambda col: (
+            pd.col(col)
+            .filter(pd.col(col).is_not_null())
+            .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+            .first()
+            .alias(col)
+        ),
+    }
+
+
+def build_aggregation_expressions(column_aggregations) -> List[Any]:
+    """Build Polars aggregation expressions from aggregation configuration.
+    
+    Args:
+        column_aggregations: Either:
+            - Dict[str, str]: Simple mapping {column: aggregation} (legacy format)
+            - Dict[str, Tuple[str, str]]: Aliased mapping {alias: (source_column, aggregation)}
+        
+    Returns:
+        List of Polars expressions for use in group_by().agg()
+        
+    Examples:
+        >>> # Legacy format (deprecated)
+        >>> aggs = build_aggregation_expressions({
+        ...     'task_runs': 'sum',
+        ...     'host_runs': 'count'
+        ... })
+        
+        >>> # New format with aliasing
+        >>> aggs = build_aggregation_expressions({
+        ...     'first_automation': ('created', 'min_non_null'),
+        ...     'last_automation': ('created', 'max_non_null'),
+        ...     'task_runs': ('task_runs', 'sum')
+        ... })
+        >>> dataframe.group_by(index_cols).agg(aggs)
+    """
+    available_aggs = get_aggregation_expressions()
+    expressions = []
+    
+    for key, value in column_aggregations.items():
+        if isinstance(value, tuple) and len(value) == 2:
+            # New format: {alias: (source_column, aggregation)}
+            source_column, agg_name = value
+            alias = key
+            
+            if agg_name not in available_aggs:
+                raise ValueError(f"Unknown aggregation '{agg_name}' for column '{source_column}' -> '{alias}'. Available: {list(available_aggs.keys())}")
+            
+            # Create expression with custom alias
+            # For aliasing mode, we need to create expressions without the automatic alias
+            agg_func = available_aggs[agg_name]
+            if agg_name == 'min_non_null':
+                expr = pd.col(source_column).filter(pd.col(source_column).is_not_null()).min().alias(alias)
+            elif agg_name == 'max_non_null':
+                expr = pd.col(source_column).filter(pd.col(source_column).is_not_null()).max().alias(alias)
+            else:
+                # For other aggregations, use the function but override the alias
+                expr = agg_func(source_column)
+                # Extract the expression without the alias and apply our alias
+                # This is a bit hacky, but necessary for the current Polars API
+                expr = expr.alias(alias)
+            expressions.append(expr)
+            
+        elif isinstance(value, str):
+            # Legacy format: {column: aggregation} (column name is both source and alias)
+            column = key
+            agg_name = value
+            
+            if agg_name not in available_aggs:
+                raise ValueError(f"Unknown aggregation '{agg_name}' for column '{column}'. Available: {list(available_aggs.keys())}")
+            
+            expressions.append(available_aggs[agg_name](column))
+        else:
+            raise ValueError(f"Invalid aggregation format for '{key}': {value}. Expected string or (source_column, aggregation) tuple.")
+    
+    return expressions
+
+
 def granularity_cast(date: datetime.date, granularity: str) -> datetime.date:
     """Cast a date to the specified granularity boundary.
 
@@ -1557,6 +1718,19 @@ class Base:
 
         # CRITICAL: Ensure schema compatibility before concat to prevent type mismatch errors
         rollup_aligned, new_group_aligned = self._align_schemas_for_concat(rollup, new_group)
+        
+        # DEBUG: Check for duplicate columns before concat
+        rollup_cols = rollup_aligned.columns
+        new_group_cols = new_group_aligned.columns
+        rollup_duplicates = [col for col in set(rollup_cols) if rollup_cols.count(col) > 1]
+        new_group_duplicates = [col for col in set(new_group_cols) if new_group_cols.count(col) > 1]
+        
+        if rollup_duplicates or new_group_duplicates:
+            print(f"ROLLUP DEBUG: Found duplicate columns before concat!")
+            print(f"  Rollup duplicates: {rollup_duplicates}")
+            print(f"  New group duplicates: {new_group_duplicates}")
+            print(f"  Rollup columns: {rollup_cols}")
+            print(f"  New group columns: {new_group_cols}")
 
         # Perform the concat operation - much simpler and more reliable than join
         import polars as pl
@@ -1614,7 +1788,7 @@ class Base:
         return result
 
     @traced_method('dataframe.dedup')
-    def dedup(self, dataframe, hostname_mapping=None):
+    def dedup(self, dataframe, hostname_mapping=None, scope_dataframe=None):
         """Deduplicate dataframe with hostname mapping and performance tracking."""
         current_span = trace.get_current_span()
 
@@ -1657,12 +1831,9 @@ class Base:
 
             df = df.with_columns(df['host_name'].map_elements(lambda x: hostname_mapping.get(x, x), return_dtype=pd.Utf8).alias('host_name'))
 
-            # CRITICAL FIX: Also apply hostname mapping to original_host_name if it exists
-            # This ensures that duplicate detection works correctly when both columns are part of unique_index_columns
-            if 'original_host_name' in df.columns:
-                df = df.with_columns(
-                    df['original_host_name'].map_elements(lambda x: hostname_mapping.get(x, x), return_dtype=pd.Utf8).alias('original_host_name')
-                )
+            # CRITICAL: Do NOT apply hostname mapping to original_host_name
+            # The original_host_name should preserve the actual original hostname value
+            # Only host_name gets mapped to the canonical value for deduplication
         map_duration = time.time() - map_start
 
         # Only regroup if hostname mapping actually created duplicates
@@ -1782,9 +1953,10 @@ class Base:
         # Ensure compatible types for matching columns
         rollup_aligned, new_group_aligned = self._ensure_compatible_types(rollup_aligned, new_group_aligned, all_columns)
 
-        # Ensure column order matches - commented out for now due to pandas/polars mixing
-        # rollup_aligned = rollup_aligned.select(all_columns)
-        # new_group_aligned = new_group_aligned.select(all_columns)
+        # Ensure column order matches to prevent "more than one occurrence" errors during concat
+        # This is critical for Polars concat operations to work correctly
+        rollup_aligned = rollup_aligned.select(all_columns)
+        new_group_aligned = new_group_aligned.select(all_columns)
 
         return rollup_aligned, new_group_aligned
 
@@ -2064,7 +2236,7 @@ class Base:
 
                             if null_count == original_null_count:
                                 # All conversions succeeded, no new nulls created
-                                df = df.with_columns(df_temp[col_name + '_temp'].alias(col_name))
+                                df = df_temp.drop(col_name).rename({col_name + '_temp': col_name})
                                 continue  # Skip the regular cast since we handled datetime specially
                             else:
                                 # Some conversions failed, try strategy 2

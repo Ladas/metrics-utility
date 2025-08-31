@@ -122,14 +122,14 @@ class Command(BaseCommand):
 
     @traced_method(SpanNames.REPORT_BUILD)
     def handle(self, *args, **options):
-        print("DEBUG: build_report.handle() starting...")
-        print(f"DEBUG: build_report options: {options}")
+        print('DEBUG: build_report.handle() starting...')
+        print(f'DEBUG: build_report options: {options}')
         if options.get('verbose'):
             debug()
 
-        print("DEBUG: Starting environment validation...")
+        print('DEBUG: Starting environment validation...')
         handle_env_validation('build')
-        print("DEBUG: Environment validation completed.")
+        print('DEBUG: Environment validation completed.')
 
         opt_since, opt_until = validate_build_params(options, self.help_texts)
 
@@ -219,100 +219,104 @@ class Command(BaseCommand):
             )
             dataframe_factory = RollupDataframeFactory(extractor=extractor, month=month, extra_params=extra_params)
             dataframes = dataframe_factory.create()
-            print(f"DEBUG: Dataframes created successfully. Keys: {list(dataframes.keys())}")
+            print(f'DEBUG: Dataframes created successfully. Keys: {list(dataframes.keys())}')
 
-        print("DEBUG: Starting deduplication phase...")
+        print('DEBUG: Starting deduplication phase...')
         with tracer.start_as_current_span(SpanNames.REPORT_DEDUPLICATION) as dedup_span:
             add_span_attributes(dedup_span, **{'deduplication.algorithm': extra_params.get('deduplicator', 'default')})
-            
+
             # Create dataframe instances for deduplication (needed to call dedup methods)
             dataframe_instances = {}
             dataframes_by_class_name = {}
-            
+
             # Map standard names to class names for deduplication
             class_name_mapping = {
                 'job_host_summary': 'DataframeJobhostSummaryUsage',
-                'main_jobevent': 'DataframeContentUsage', 
+                'main_jobevent': 'DataframeContentUsage',
                 'main_host': 'DataframeInventoryScope',
-                'data_collection_status': 'DataframeCollectionStatus'
+                'data_collection_status': 'DataframeCollectionStatus',
             }
-            
+
             for df_name, dataframe_data in dataframes.items():
                 if dataframe_data is not None:
                     class_name = class_name_mapping.get(df_name, df_name)
-                    
+
                     # Debug: Check input data before deduplication
                     if df_name == 'job_host_summary':
-                        print(f"DEBUG DEDUP INPUT: {df_name} -> {class_name}: {len(dataframe_data)} records")
+                        print(f'DEBUG DEDUP INPUT: {df_name} -> {class_name}: {len(dataframe_data)} records')
                         if 'host_name' in dataframe_data.columns:
                             hosts = dataframe_data['host_name'].unique().to_list()
-                            print(f"DEBUG DEDUP INPUT: Hosts in {df_name}: {sorted(hosts)}")
-                            
+                            print(f'DEBUG DEDUP INPUT: Hosts in {df_name}: {sorted(hosts)}')
+
                             # Check specifically for missing hosts
                             missing_hosts = ['manually_created_host_1', 'test_host_42']
                             for missing_host in missing_hosts:
                                 if missing_host in hosts:
-                                    print(f"DEBUG DEDUP INPUT: ✓ {missing_host} FOUND in {df_name}")
+                                    print(f'DEBUG DEDUP INPUT: ✓ {missing_host} FOUND in {df_name}')
                                     host_records = dataframe_data.filter(dataframe_data['host_name'] == missing_host)
-                                    print(f"DEBUG DEDUP INPUT:   Records for {missing_host}: {len(host_records)}")
+                                    print(f'DEBUG DEDUP INPUT:   Records for {missing_host}: {len(host_records)}')
                                     if len(host_records) > 0:
                                         sample = host_records.head(1).to_dicts()[0]
-                                        print(f"DEBUG DEDUP INPUT:   Sample: host={sample.get('host_name')}, org={sample.get('organization_name')}, task_runs={sample.get('task_runs')}")
+                                        print(
+                                            f'DEBUG DEDUP INPUT:   Sample: host={sample.get("host_name")}, org={sample.get("organization_name")}, task_runs={sample.get("task_runs")}'
+                                        )
                                 else:
-                                    print(f"DEBUG DEDUP INPUT: ✗ {missing_host} MISSING from {df_name}")
-                    
+                                    print(f'DEBUG DEDUP INPUT: ✗ {missing_host} MISSING from {df_name}')
+
                     # Create dataframe instance
                     dataframe_class = self._get_dataframe_class_for_dedup(class_name)
                     if dataframe_class:
                         dataframe_instances[class_name] = dataframe_class(extractor=extractor, month=month, extra_params=extra_params)
                         dataframes_by_class_name[class_name] = dataframe_data
-            
+
             # Create dedup factory and pass DataFrames keyed by class names
-            print(f"DEBUG: Creating dedup factory with {len(dataframes_by_class_name)} dataframes...")
+            print(f'DEBUG: Creating dedup factory with {len(dataframes_by_class_name)} dataframes...')
             dedup = DedupFactory(dataframes=dataframes_by_class_name, extra_params=extra_params).create()
-            
+
             # Set up the deduplicator with both the actual DataFrames and the instances
-            print("DEBUG: Setting up deduplicator...")
+            print('DEBUG: Setting up deduplicator...')
             dedup.dataframes = dataframes_by_class_name
             dedup.dataframe_instances = dataframe_instances
-            
-            print("DEBUG: Running deduplication...")
+
+            print('DEBUG: Running deduplication...')
             deduplicated_dataframes = dedup.run()
-            print(f"DEBUG: Deduplication completed. Got {len(deduplicated_dataframes)} dataframes back.")
-            
+            print(f'DEBUG: Deduplication completed. Got {len(deduplicated_dataframes)} dataframes back.')
+
             # Map deduplicated results back to standard names for reports
-            print("DEBUG: Mapping deduplicated results back to standard names...")
+            print('DEBUG: Mapping deduplicated results back to standard names...')
             reverse_mapping = {v: k for k, v in class_name_mapping.items()}
             dataframes = {}
             for class_name, deduped_df in deduplicated_dataframes.items():
                 standard_name = reverse_mapping.get(class_name, class_name)
                 dataframes[standard_name] = deduped_df
-                
+
                 # Debug: Check output data after deduplication
                 if standard_name == 'job_host_summary' and deduped_df is not None:
-                    print(f"DEBUG DEDUP OUTPUT: {class_name} -> {standard_name}: {len(deduped_df)} records")
+                    print(f'DEBUG DEDUP OUTPUT: {class_name} -> {standard_name}: {len(deduped_df)} records')
                     if 'host_name' in deduped_df.columns:
                         hosts = deduped_df['host_name'].unique().to_list()
-                        print(f"DEBUG DEDUP OUTPUT: Hosts in {standard_name}: {sorted(hosts)}")
-                        
+                        print(f'DEBUG DEDUP OUTPUT: Hosts in {standard_name}: {sorted(hosts)}')
+
                         # Check specifically for missing hosts
                         missing_hosts = ['manually_created_host_1', 'test_host_42']
                         for missing_host in missing_hosts:
                             if missing_host in hosts:
-                                print(f"DEBUG DEDUP OUTPUT: ✓ {missing_host} SURVIVED deduplication")
+                                print(f'DEBUG DEDUP OUTPUT: ✓ {missing_host} SURVIVED deduplication')
                                 host_records = deduped_df.filter(deduped_df['host_name'] == missing_host)
-                                print(f"DEBUG DEDUP OUTPUT:   Records for {missing_host}: {len(host_records)}")
+                                print(f'DEBUG DEDUP OUTPUT:   Records for {missing_host}: {len(host_records)}')
                                 if len(host_records) > 0:
                                     sample = host_records.head(1).to_dicts()[0]
-                                    print(f"DEBUG DEDUP OUTPUT:   Sample: host={sample.get('host_name')}, org={sample.get('organization_name')}, task_runs={sample.get('task_runs')}")
+                                    print(
+                                        f'DEBUG DEDUP OUTPUT:   Sample: host={sample.get("host_name")}, org={sample.get("organization_name")}, task_runs={sample.get("task_runs")}'
+                                    )
                             else:
-                                print(f"DEBUG DEDUP OUTPUT: ✗ {missing_host} LOST during deduplication")
-                print(f"DEBUG: Mapped {class_name} -> {standard_name} with {len(deduped_df) if deduped_df is not None else 0} records")
+                                print(f'DEBUG DEDUP OUTPUT: ✗ {missing_host} LOST during deduplication')
+                print(f'DEBUG: Mapped {class_name} -> {standard_name} with {len(deduped_df) if deduped_df is not None else 0} records')
 
         # Check if we have any data, but allow partial reports
-        print("DEBUG: Checking dataframe content...")
+        print('DEBUG: Checking dataframe content...')
         non_empty_dataframes = [df for df in dataframes.values() if df is not None and len(df) > 0]
-        print(f"DEBUG: Found {len(non_empty_dataframes)} non-empty dataframes out of {len(dataframes)} total")
+        print(f'DEBUG: Found {len(non_empty_dataframes)} non-empty dataframes out of {len(dataframes)} total')
         if not non_empty_dataframes:
             if opt_since is not None:
                 logger.warning(f'No billing data found for input date range {since_date}--{until_date}')
@@ -324,31 +328,32 @@ class Command(BaseCommand):
             logger.info(f'Found data in {len(non_empty_dataframes)} out of {len(dataframes)} dataframes')
             print("DEBUG: After logging 'Found data...' message")
             if len(non_empty_dataframes) < len(dataframes):
-                print("DEBUG: About to check missing dataframes...")
+                print('DEBUG: About to check missing dataframes...')
                 missing_dataframes = [name for name, df in dataframes.items() if df is None or len(df) == 0]
-                print(f"DEBUG: Missing dataframes calculated: {missing_dataframes}")
+                print(f'DEBUG: Missing dataframes calculated: {missing_dataframes}')
                 logger.info(f'Some dataframes have no data: {missing_dataframes}')
                 logger.info('Generating report with available data')
-            print("DEBUG: Finished checking missing dataframes, proceeding to report generation...")
+            print('DEBUG: Finished checking missing dataframes, proceeding to report generation...')
 
-        print("DEBUG: Starting report generation phase...")
+        print('DEBUG: Starting report generation phase...')
         with tracer.start_as_current_span(SpanNames.REPORT_SHEET_GENERATION) as sheet_span:
             add_span_attributes(sheet_span, **{'report.dataframe_count': len([df for df in dataframes.values() if df is not None and len(df) > 0])})
-            print("DEBUG: Creating report engine...")
+            print('DEBUG: Creating report engine...')
             report_engine = ReportFactory(dataframes=dataframes, extra_params=extra_params).create()
-            print(f"DEBUG: Report engine created: {type(report_engine)}")
-            print("DEBUG: Building spreadsheet...")
+            print(f'DEBUG: Report engine created: {type(report_engine)}')
+            print('DEBUG: Building spreadsheet...')
             try:
                 report_spreadsheet = report_engine.build_spreadsheet()
-                print("DEBUG: Spreadsheet built successfully!")
+                print('DEBUG: Spreadsheet built successfully!')
             except Exception as e:
-                print(f"DEBUG: Error building spreadsheet: {e}")
+                print(f'DEBUG: Error building spreadsheet: {e}')
                 import traceback
-                print(f"DEBUG: Traceback: {traceback.format_exc()}")
+
+                print(f'DEBUG: Traceback: {traceback.format_exc()}')
                 raise
 
         # Save the report to the configured destination
-        print("DEBUG: Starting report save phase...")
+        print('DEBUG: Starting report save phase...')
         with tracer.start_as_current_span(SpanNames.REPORT_XLSX_SAVE) as save_span:
             add_span_attributes(save_span, **{SpanAttributes.REPORT_OUTPUT_PATH: report_saver_engine.report_spreadsheet_destination_path})
             report_saver_engine.save(report_spreadsheet)
@@ -427,16 +432,22 @@ class Command(BaseCommand):
         """Get the dataframe class for deduplication instance creation"""
         try:
             if class_name == 'DataframeJobhostSummaryUsage':
-                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_jobhost_summary_usage import DataframeJobhostSummaryUsage
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_jobhost_summary_usage import (
+                    DataframeJobhostSummaryUsage,
+                )
+
                 return DataframeJobhostSummaryUsage
             elif class_name == 'DataframeContentUsage':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_content_usage import DataframeContentUsage
+
                 return DataframeContentUsage
             elif class_name == 'DataframeInventoryScope':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope import DataframeInventoryScope
+
                 return DataframeInventoryScope
             elif class_name == 'DataframeCollectionStatus':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_collection_status import DataframeCollectionStatus
+
                 return DataframeCollectionStatus
             else:
                 return None
