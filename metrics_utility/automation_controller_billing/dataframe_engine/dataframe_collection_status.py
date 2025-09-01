@@ -117,26 +117,70 @@ class DataframeCollectionStatus(Base):
         batch_group = self.group(batch)
         return batch_group
 
+    @traced_method('collection_status.group')
     def group(self, dataframe):
-        """Group collection status dataframe by unique index columns."""
+        """Group collection status dataframe by unique index columns with proper aggregation."""
+        current_span = trace.get_current_span()
+        
         if dataframe is None or len(dataframe) == 0:
             return self.empty()
 
-        # Use centralized aggregation system from base class
+        # Apply column mapping if needed (for source CSV with different column names)
+        dataframe = self._apply_column_mapping(dataframe)
+
+        # Use proper aggregation for collection status data
         from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
         
-        # Build aggregation expressions using centralized system
         agg_exprs = build_aggregation_expressions(self.group_aggregations())
         
+        # Perform the group by operation with detailed metrics
+        groupby_start = time.time()
+        input_count_for_groupby = len(dataframe) if dataframe is not None else 0
         group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
+        groupby_duration = time.time() - groupby_start
+        output_count_for_groupby = len(group) if group is not None else 0
+        
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.group.groupby_duration_seconds': groupby_duration,
+                'dataframe.group.maintain_order': True,
+                'polars.group_by.input_records': input_count_for_groupby,
+                'polars.group_by.output_records': output_count_for_groupby,
+                'polars.group_by.compression_ratio': (input_count_for_groupby - output_count_for_groupby) / input_count_for_groupby if input_count_for_groupby > 0 else 0,
+            },
+        )
 
         # Schema application will be handled by base class _group_with_schema
         return group
 
+    def _apply_column_mapping(self, dataframe):
+        """Apply column mapping from source CSV format to expected format."""
+        # Mapping from source CSV columns to expected DataframeCollectionStatus columns
+        column_mapping = {
+            'report_uuid': 'collection_start_timestamp',
+            'created': 'since', 
+            'modified': 'until',
+            'collection_type': 'file_name',
+            'collector_name': 'status',
+            'status': 'elapsed',
+        }
+        
+        # Check if dataframe needs mapping (has source column names)
+        current_columns = set(dataframe.columns)
+        source_columns = set(column_mapping.keys())
+        
+        # If dataframe has source column structure, apply mapping
+        if source_columns.issubset(current_columns):
+            # Rename columns according to mapping
+            dataframe = dataframe.rename(column_mapping)
+            
+        return dataframe
+
     # Merge pre-aggregated
     @traced_method('collection_status.regroup')
     def regroup(self, dataframe):
-        """Regroup pre-aggregated collection status dataframe with performance tracking."""
+        """Regroup collection status dataframe with performance tracking and proper aggregation."""
         current_span = trace.get_current_span()
 
         start_time = time.time()
@@ -146,23 +190,35 @@ class DataframeCollectionStatus(Base):
             current_span,
             **{
                 'dataframe.regroup.input_record_count': input_count,
-                'dataframe.regroup.index_columns': len(self.unique_index_columns()),
-                'dataframe.regroup.operation': 'collection_status_regroup_after_dedup',
+                'dataframe.regroup.operation': 'collection_status_proper_aggregation',
             },
         )
 
-        # Use centralized aggregation system for regroup operations
+        # Use proper aggregation for regrouping collection status data
         from metrics_utility.automation_controller_billing.dataframe_engine.base import build_aggregation_expressions
         
-        # Build regroup aggregation expressions using centralized system
         regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
         
+        # Perform the regroup by operation with detailed metrics
+        regroup_start = time.time()
+        input_count_for_regroup = len(dataframe) if dataframe is not None else 0
         result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
+        regroup_duration = time.time() - regroup_start
+        output_count_for_regroup = len(result) if result is not None else 0
+        
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.regroup.groupby_duration_seconds': regroup_duration,
+                'dataframe.regroup.maintain_order': True,
+                'polars.group_by.input_records': input_count_for_regroup,
+                'polars.group_by.output_records': output_count_for_regroup,
+                'polars.group_by.compression_ratio': (input_count_for_regroup - output_count_for_regroup) / input_count_for_regroup if input_count_for_regroup > 0 else 0,
+            },
+        )
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0
-
-        # Schema application will be handled by base class regroup_with_schema
 
         add_span_attributes(
             current_span,
@@ -173,10 +229,12 @@ class DataframeCollectionStatus(Base):
             },
         )
 
-        if duration > 0.5:
-            add_span_attributes(current_span, **{'dataframe.regroup.slow_operation': True})
-
         return result
+
+    def merge(self, rollup, new_group):
+        """Use standard merge behavior with proper aggregation."""
+        # Use the base class merge method which includes proper aggregation via regroup()
+        return super().merge(rollup, new_group)
 
     @staticmethod
     def unique_index_columns():

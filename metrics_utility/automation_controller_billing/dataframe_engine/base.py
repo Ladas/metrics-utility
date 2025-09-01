@@ -141,6 +141,7 @@ def get_aggregation_expressions() -> Dict[str, Any]:
     }
 
 
+
 def build_aggregation_expressions(column_aggregations) -> List[Any]:
     """Build Polars aggregation expressions from aggregation configuration.
     
@@ -404,9 +405,14 @@ def json_to_list_format(json_str: Union[str, None]) -> Dict[str, List[str]]:
         result = {}
         for key, value in parsed.items():
             if isinstance(value, list):
-                result[key] = value  # Already a list
+                # Filter out "NA" values from existing lists
+                filtered_values = [v for v in value if v != "NA"]
+                if filtered_values:  # Only include non-empty lists
+                    result[key] = filtered_values
             else:
-                result[key] = [value]  # Convert to list
+                # Filter out "NA" values from single values
+                if value != "NA":
+                    result[key] = [value]  # Convert to list only if not "NA"
         return result
     except:
         return {}
@@ -1720,7 +1726,18 @@ class Base:
             new_group = self._ensure_complete_schema(new_group)
 
         # CRITICAL: Ensure schema compatibility before concat to prevent type mismatch errors
+        alignment_start = time.time()
         rollup_aligned, new_group_aligned = self._align_schemas_for_concat(rollup, new_group)
+        alignment_duration = time.time() - alignment_start
+        
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.merge.alignment_duration_seconds': alignment_duration,
+                'dataframe.merge.rollup_aligned_records': len(rollup_aligned) if rollup_aligned is not None else 0,
+                'dataframe.merge.new_group_aligned_records': len(new_group_aligned) if new_group_aligned is not None else 0,
+            },
+        )
         
         # DEBUG: Check for duplicate columns before concat
         rollup_cols = rollup_aligned.columns
@@ -1735,10 +1752,27 @@ class Base:
             print(f"  Rollup columns: {rollup_cols}")
             print(f"  New group columns: {new_group_cols}")
 
-        # Perform the concat operation - much simpler and more reliable than join
+        # Perform the concat operation with simple timing metrics
         import polars as pl
-
+        
+        rollup_input_count = len(rollup_aligned) if rollup_aligned is not None else 0
+        new_group_input_count = len(new_group_aligned) if new_group_aligned is not None else 0
+        
+        concat_operation_start = time.time()
         concatenated = pl.concat([rollup_aligned, new_group_aligned], how='vertical')
+        concat_operation_duration = time.time() - concat_operation_start
+        
+        output_count = len(concatenated) if concatenated is not None else 0
+        
+        # Add simple concat metrics to current span
+        add_span_attributes(
+            current_span,
+            **{
+                'polars.concat.duration_seconds': concat_operation_duration,
+                'polars.concat.input_records': rollup_input_count + new_group_input_count,
+                'polars.concat.output_records': output_count,
+            },
+        )
 
         concat_duration = time.time() - concat_start
 
@@ -1752,18 +1786,24 @@ class Base:
 
         # Now use standardized regroup with schema handling
         regroup_start = time.time()
+        pre_regroup_count = len(concatenated) if concatenated is not None else 0
+        
         if hasattr(self, 'regroup') and callable(self.regroup):
             result = self.regroup_with_schema(concatenated)
         else:
             result = concatenated
 
         regroup_duration = time.time() - regroup_start
+        post_regroup_count = len(result) if result is not None else 0
 
         add_span_attributes(
             current_span,
             **{
                 'dataframe.merge.regroup_duration_seconds': regroup_duration,
-                'dataframe.merge.after_regroup_record_count': len(result) if result is not None else 0,
+                'dataframe.merge.pre_regroup_record_count': pre_regroup_count,
+                'dataframe.merge.after_regroup_record_count': post_regroup_count,
+                'dataframe.merge.regroup_compression_ratio': (pre_regroup_count - post_regroup_count) / pre_regroup_count if pre_regroup_count > 0 else 0,
+                'dataframe.merge.regroup_method': 'regroup_with_schema' if hasattr(self, 'regroup') else 'no_regroup',
             },
         )
 

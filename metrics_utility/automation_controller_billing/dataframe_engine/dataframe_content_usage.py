@@ -376,7 +376,23 @@ class DataframeContentUsage(Base):
         # Build aggregation expressions using centralized system
         agg_exprs = build_aggregation_expressions(self.group_aggregations())
         
+        # Perform the group by operation with detailed metrics
+        groupby_start = time.time()
+        input_count_for_groupby = len(dataframe) if dataframe is not None else 0
         result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
+        groupby_duration = time.time() - groupby_start
+        output_count_for_groupby = len(result) if result is not None else 0
+        
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.group.groupby_duration_seconds': groupby_duration,
+                'dataframe.group.maintain_order': True,
+                'polars.group_by.input_records': input_count_for_groupby,
+                'polars.group_by.output_records': output_count_for_groupby,
+                'polars.group_by.compression_ratio': (input_count_for_groupby - output_count_for_groupby) / input_count_for_groupby if input_count_for_groupby > 0 else 0,
+            },
+        )
 
         # Duration is null in older versions of Controller - handle with schema defaults
         result = result.with_columns(result['duration'].fill_null(0).alias('duration'))
@@ -424,7 +440,23 @@ class DataframeContentUsage(Base):
         # Build regroup aggregation expressions using centralized system
         regroup_exprs = build_aggregation_expressions(self.regroup_aggregations())
         
+        # Perform the regroup by operation with detailed metrics
+        regroup_start = time.time()
+        input_count_for_regroup = len(dataframe) if dataframe is not None else 0
         result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
+        regroup_duration = time.time() - regroup_start
+        output_count_for_regroup = len(result) if result is not None else 0
+        
+        add_span_attributes(
+            current_span,
+            **{
+                'dataframe.regroup.groupby_duration_seconds': regroup_duration,
+                'dataframe.regroup.maintain_order': True,
+                'polars.group_by.input_records': input_count_for_regroup,
+                'polars.group_by.output_records': output_count_for_regroup,
+                'polars.group_by.compression_ratio': (input_count_for_regroup - output_count_for_regroup) / input_count_for_regroup if input_count_for_regroup > 0 else 0,
+            },
+        )
 
         duration = time.time() - start_time
         output_count = len(result) if result is not None else 0
