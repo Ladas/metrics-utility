@@ -80,6 +80,11 @@ def get_aggregation_expressions() -> Dict[str, Any]:
         'last_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).last().alias(col),
         'max_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).max().alias(col),
         'min_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).min().alias(col),
+        # ========================================
+        # DETERMINISTIC AGGREGATIONS (ORDER-INDEPENDENT)
+        # ========================================
+        'min_string_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).min().alias(col),  # Lexicographically smallest
+        'max_string_non_null': lambda col: pd.col(col).filter(pd.col(col).is_not_null()).max().alias(col),  # Lexicographically largest
         
         # ========================================
         # LIST/COLLECTION AGGREGATIONS

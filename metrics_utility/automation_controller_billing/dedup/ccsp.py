@@ -58,7 +58,7 @@ class DedupCCSP:
 
     def df_to_mapping(self, df):
         serial_to_hosts = defaultdict(set)
-        serial_to_first = {}
+        serial_to_first = {}  # Will store (hostname, timestamp) tuples
 
         print(f'DEBUG DEDUP MAPPING: Input dataframe has {len(df)} records')
         if 'host_name' in df.columns:
@@ -75,9 +75,10 @@ class DedupCCSP:
         for row in iterator:
             host = row['host_name']
             serials = row['serials']
+            last_automation = row.get('last_automation')  # Get timestamp
 
             if host in missing_hosts:
-                print(f'DEBUG DEDUP MAPPING: Processing {host}: serials={serials}, type={type(serials)}')
+                print(f'DEBUG DEDUP MAPPING: Processing {host}: serials={serials}, last_automation={last_automation}')
 
             if serials is not None and len(serials) > 0:
                 # Handle string serials (convert to list if needed)
@@ -89,19 +90,49 @@ class DedupCCSP:
                 for serial in serial_list:
                     if serial:
                         serial_to_hosts[serial].add(host)
+                        
+                        # DETERMINISTIC: Use hostname with latest timestamp as canonical
+                        # This ensures the "last seen" hostname becomes canonical
                         if serial not in serial_to_first:
-                            serial_to_first[serial] = host
+                            serial_to_first[serial] = (host, last_automation)
+                        else:
+                            current_host, current_timestamp = serial_to_first[serial]
+                            
+                            if 'web02' in host or 'web01' in host or 'web02' in current_host or 'web01' in current_host:
+                                print(f'DEBUG TIMESTAMP: Comparing {host}({last_automation}) vs {current_host}({current_timestamp}) for serial {serial}')
+                            
+                            # Compare timestamps - prefer NEWER (latest) timestamp
+                            if last_automation is not None and current_timestamp is not None:
+                                if last_automation > current_timestamp:
+                                    serial_to_first[serial] = (host, last_automation)
+                                    if 'web02' in host or 'web01' in host:
+                                        print(f'DEBUG TIMESTAMP: Chose {host} (newer: {last_automation} > {current_timestamp})')
+                                else:
+                                    if 'web02' in host or 'web01' in host:
+                                        print(f'DEBUG TIMESTAMP: Kept {current_host} (newer: {current_timestamp} >= {last_automation})')
+                            elif last_automation is not None and current_timestamp is None:
+                                # Prefer host with timestamp over host without timestamp
+                                serial_to_first[serial] = (host, last_automation)
+                                if 'web02' in host or 'web01' in host:
+                                    print(f'DEBUG TIMESTAMP: Chose {host} (has timestamp vs None)')
+                            elif last_automation is None and current_timestamp is None:
+                                # Both are None, use lexicographic ordering as fallback
+                                if host < current_host:
+                                    serial_to_first[serial] = (host, last_automation)
+                                    if 'web02' in host or 'web01' in host:
+                                        print(f'DEBUG TIMESTAMP: Chose {host} (lexicographic fallback)')
+                            # If current has timestamp but new doesn't, keep current
 
                         if host in missing_hosts:
-                            print(f'DEBUG DEDUP MAPPING: {host} mapped to serial {serial}')
+                            print(f'DEBUG DEDUP MAPPING: {host} mapped to serial {serial}, timestamp={last_automation}')
 
         host_to_canonical = {}
         for serial, hosts in serial_to_hosts.items():
-            canonical = serial_to_first[serial]
+            canonical_host, canonical_timestamp = serial_to_first[serial]  # Extract hostname from tuple
             for host in hosts:
-                host_to_canonical[host] = canonical
+                host_to_canonical[host] = canonical_host
                 if host in missing_hosts:
-                    print(f'DEBUG DEDUP MAPPING: {host} -> canonical {canonical}')
+                    print(f'DEBUG DEDUP MAPPING: {host} -> canonical {canonical_host} (timestamp: {canonical_timestamp})')
 
         print(f'DEBUG DEDUP MAPPING: Created mapping for {len(host_to_canonical)} hosts')
         for missing_host in missing_hosts:

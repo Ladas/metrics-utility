@@ -136,7 +136,7 @@ class DataframeCollectionStatus(Base):
         # Perform the group by operation with detailed metrics
         groupby_start = time.time()
         input_count_for_groupby = len(dataframe) if dataframe is not None else 0
-        group = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(agg_exprs)
+        group = dataframe.group_by(self.unique_index_columns()).agg(agg_exprs)
         groupby_duration = time.time() - groupby_start
         output_count_for_groupby = len(group) if group is not None else 0
         
@@ -144,7 +144,6 @@ class DataframeCollectionStatus(Base):
             current_span,
             **{
                 'dataframe.group.groupby_duration_seconds': groupby_duration,
-                'dataframe.group.maintain_order': True,
                 'polars.group_by.input_records': input_count_for_groupby,
                 'polars.group_by.output_records': output_count_for_groupby,
                 'polars.group_by.compression_ratio': (input_count_for_groupby - output_count_for_groupby) / input_count_for_groupby if input_count_for_groupby > 0 else 0,
@@ -202,7 +201,7 @@ class DataframeCollectionStatus(Base):
         # Perform the regroup by operation with detailed metrics
         regroup_start = time.time()
         input_count_for_regroup = len(dataframe) if dataframe is not None else 0
-        result = dataframe.group_by(self.unique_index_columns(), maintain_order=True).agg(regroup_exprs)
+        result = dataframe.group_by(self.unique_index_columns()).agg(regroup_exprs)
         regroup_duration = time.time() - regroup_start
         output_count_for_regroup = len(result) if result is not None else 0
         
@@ -210,7 +209,6 @@ class DataframeCollectionStatus(Base):
             current_span,
             **{
                 'dataframe.regroup.groupby_duration_seconds': regroup_duration,
-                'dataframe.regroup.maintain_order': True,
                 'polars.group_by.input_records': input_count_for_regroup,
                 'polars.group_by.output_records': output_count_for_regroup,
                 'polars.group_by.compression_ratio': (input_count_for_regroup - output_count_for_regroup) / input_count_for_regroup if input_count_for_regroup > 0 else 0,
