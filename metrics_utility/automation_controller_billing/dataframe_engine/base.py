@@ -449,12 +449,15 @@ def merge_list_format_dicts(dict_list: List[Dict[str, List[str]]]) -> Dict[str, 
                 merged[key].append(values)
 
     # Remove duplicates and sort for consistent ordering
+    # Also remove keys with empty lists (fields that had no actual values)
+    final_merged = {}
     for key in merged:
         filtered = [x for x in merged[key] if x is not None]
         unique_values = list(dict.fromkeys(filtered))
-        merged[key] = sorted(unique_values)
+        if unique_values:  # Only keep keys that have actual values
+            final_merged[key] = sorted(unique_values)
 
-    return merged
+    return final_merged
 
 
 def merge_and_stringify_facts(json_strings: List[str]) -> str:

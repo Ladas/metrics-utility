@@ -391,6 +391,7 @@ class DataframeJobhostSummaryUsage(Base):
         return ['organization_name', 'job_template_name', 'host_name', 'original_host_name', 'install_uuid', 'job_remote_id']
 
 
+
     @staticmethod
     def data_columns():
         """Define data columns that need aggregation when grouping records."""
@@ -429,9 +430,10 @@ class DataframeJobhostSummaryUsage(Base):
             'managed_node_type': 'min',  # Use lowest managed node type (DIRECT=0, INDIRECT=1)
             'canonical_facts': 'merge_json_facts',  # Merge JSON fact strings
             'facts': 'merge_json_facts',  # Merge JSON fact strings
-            'managed_node_types_set': 'flatten_unique',  # Flatten and get unique from List columns
+            # Aggregate managed_node_type_string into managed_node_types_set as a list
+            'managed_node_types_set': ('managed_node_type_string', 'unique'),  # Convert string column to unique list
             'events': 'merge_lists_unique',  # Merge event lists with unique values
-            'host_names_before_dedup': 'merge_lists_unique',  # Merge host name lists
+            'host_names_before_dedup': 'flatten_unique',  # Flatten and merge host name lists
         }
 
     @staticmethod
@@ -514,8 +516,8 @@ class DataframeJobhostSummaryUsage(Base):
     def _process_batch_data(self, batch_data, current_span):
         """Process job host summary batch data for JobHost Summary dataframe.
 
-        This method processes a single batch of job host summary or indirect nodes data,
-        determining the node type and applying appropriate processing.
+        This method processes a single batch of job host summary AND/OR indirect nodes data,
+        combining both data sources when available.
 
         Args:
             batch_data: Dictionary containing batch data with keys:
@@ -527,38 +529,53 @@ class DataframeJobhostSummaryUsage(Base):
         Returns:
             Processed Polars DataFrame ready for grouping, or None if no valid data
         """
-        # Check which data source we have and determine managed_node_type first
+        # Check both data sources and process each separately, then combine
         job_host_data = batch_data.get('job_host_summary')
         indirect_data = batch_data.get('indirect_nodes')
-
-        # Determine which data to use and corresponding node type
-        if job_host_data is not None and not (hasattr(job_host_data, 'empty') and len(job_host_data) == 0):
-            billing_data = job_host_data
-            managed_node_type = DIRECT
-        elif indirect_data is not None and not (hasattr(indirect_data, 'empty') and len(indirect_data) == 0):
-            billing_data = indirect_data
-            managed_node_type = INDIRECT
-        else:
-            # No valid data in this batch
-            return None
-
         date = batch_data.get('_date_context')  # Get date from context
-        processed_data = self._process_individual_batch_data(billing_data, batch_data, managed_node_type, current_span, date)
+        
+        processed_dataframes = []
 
-        if processed_data is None or len(processed_data) == 0:
+        # Process direct managed node data (job_host_summary)
+        if job_host_data is not None and not (hasattr(job_host_data, 'empty') and len(job_host_data) == 0):
+            print(f'DEBUG: Processing {len(job_host_data)} direct managed node records for {date}')
+            direct_processed = self._process_individual_batch_data(job_host_data, batch_data, DIRECT, current_span, date)
+            if direct_processed is not None and len(direct_processed) > 0:
+                print(f'DEBUG: Added {len(direct_processed)} direct records to combined dataframe')
+                processed_dataframes.append(direct_processed)
+
+        # Process indirect managed node data (main_indirectmanagednodeaudit)
+        if indirect_data is not None and not (hasattr(indirect_data, 'empty') and len(indirect_data) == 0):
+            print(f'DEBUG: Processing {len(indirect_data)} indirect managed node records for {date}')
+            indirect_processed = self._process_individual_batch_data(indirect_data, batch_data, INDIRECT, current_span, date)
+            if indirect_processed is not None and len(indirect_processed) > 0:
+                print(f'DEBUG: Added {len(indirect_processed)} indirect records to combined dataframe')
+                processed_dataframes.append(indirect_processed)
+
+        # If no valid data from either source
+        if not processed_dataframes:
             return None
+
+        # Combine all processed dataframes
+        if len(processed_dataframes) == 1:
+            combined_data = processed_dataframes[0]
+            print(f'DEBUG: Using single dataframe with {len(combined_data)} records for {date}')
+        else:
+            # Concatenate multiple dataframes (direct + indirect)
+            combined_data = pd.concat(processed_dataframes, how='diagonal_relaxed')
+            print(f'DEBUG: Combined {len(processed_dataframes)} dataframes into {len(combined_data)} total records for {date}')
 
         # Filter out any records with empty/null host names - these should not be processed
-        if 'host_name' in processed_data.columns:
+        if 'host_name' in combined_data.columns:
             valid_hosts_mask = (
-                (processed_data['host_name'].is_not_null()) & (processed_data['host_name'] != '') & (processed_data['host_name'] != 'null')
+                (combined_data['host_name'].is_not_null()) & (combined_data['host_name'] != '') & (combined_data['host_name'] != 'null')
             )
-            processed_data = processed_data.filter(valid_hosts_mask)
-            if len(processed_data) == 0:
+            combined_data = combined_data.filter(valid_hosts_mask)
+            if len(combined_data) == 0:
                 print(f'DEBUG: Filtered out all records with empty host names for {date}')
                 return None
 
-        return processed_data
+        return combined_data
 
     def _add_summary_validation_metrics(self, groups_processed: int, total_input_records: int, final_record_count: int, build_duration: float):
         """Add summary validation metrics for the entire dataframe build process."""
@@ -662,8 +679,6 @@ class DataframeJobhostSummaryUsage(Base):
                 pd.lit(managed_node_type_string).alias('managed_node_type_string'),
                 pd.lit(batch_data['config']['install_uuid']).alias('install_uuid'),
                 billing_data['host_name'].alias('original_host_name'),
-                # Initialize managed_node_types_set with the current managed node type string
-                pd.lit([managed_node_type_string]).alias('managed_node_types_set'),
             ]
         )
 
@@ -672,13 +687,14 @@ class DataframeJobhostSummaryUsage(Base):
         # Add initial host_runs
         billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
 
+        # Apply ansible_host_variable mapping if present
+        billing_data = self._apply_host_variable_mapping(billing_data)
+
         # Add host tracking columns BEFORE hostname mapping to capture original hostnames
+        # Create as a list so unique aggregation can accumulate multiple values across records
         billing_data = billing_data.with_columns(
             [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
         )
-
-        # Apply ansible_host_variable mapping if present
-        billing_data = self._apply_host_variable_mapping(billing_data)
 
         # Calculate task_runs by summing task counters
         task_calc_start = time.time()
@@ -722,6 +738,7 @@ class DataframeJobhostSummaryUsage(Base):
         billing_data = billing_data.with_columns([pd.lit(1).alias('host_runs')])
 
         # Add host tracking columns BEFORE hostname mapping to capture original hostnames
+        # Create as a list so unique aggregation can accumulate multiple values across records
         billing_data = billing_data.with_columns(
             [pd.col('host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')]
         )
@@ -899,16 +916,16 @@ class DataframeJobhostSummaryUsage(Base):
     def regroup(self, dataframe):
         """Regroup pre-aggregated dataframe with performance tracking.
 
-        Uses dedup_index_columns() instead of unique_index_columns() to properly aggregate
-        records that represent the same deduplicated host but came from different jobs.
-        This ensures host_names_before_dedup and other host-level fields are properly merged.
+        Uses unique_index_columns() for standard rollup merging operations.
+        The hostname deduplication is handled by creating host_names_before_dedup as lists
+        that can accumulate multiple values during aggregation.
         """
         current_span = trace.get_current_span()
 
         start_time = time.time()
         input_count = len(dataframe) if dataframe is not None else 0
 
-        # Use the standard unique index columns to preserve individual job records
+        # Use standard index columns for rollup merging
         group_columns = self.unique_index_columns()
 
         add_span_attributes(
@@ -968,16 +985,6 @@ class DataframeJobhostSummaryUsage(Base):
             for row in web01_before.iter_rows(named=True):
                 print(f"  {row['host_name']} (orig: {row['original_host_name']}) - job_id: {row['job_remote_id']}")
             print()
-
-        # CRITICAL: Preserve ALL original hostnames in host_names_before_dedup BEFORE any hostname mapping
-        # The host_names_before_dedup field should contain ALL original host names that will be
-        # mapped to the same canonical hostname during deduplication - this happens BEFORE mapping
-        if 'original_host_name' in dataframe.columns and 'host_names_before_dedup' in dataframe.columns:
-            # Use original_host_name instead of host_name to capture the true original hostnames
-            # This ensures we capture the actual original hostnames before any mapping occurs
-            dataframe = dataframe.with_columns([
-                pd.col('original_host_name').map_elements(lambda x: [x], return_dtype=pd.List(pd.Utf8)).alias('host_names_before_dedup')
-            ])
 
         # Enrich direct managed nodes with canonical facts and facts from scope data
         # when experimental deduplication is enabled

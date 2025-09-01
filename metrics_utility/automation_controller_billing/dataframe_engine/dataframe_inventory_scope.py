@@ -525,7 +525,7 @@ class DataframeInventoryScope(Base):
                 billing_data['canonical_facts']
                 .map_elements(lambda x: compute_serial({'canonical_facts': x}) if x else None, return_dtype=pd.Utf8)
                 .alias('serial'),
-                billing_data['original_host_name'].alias('host_names_before_dedup'),
+                billing_data['host_name'].alias('host_names_before_dedup'),
             ]
         )
 

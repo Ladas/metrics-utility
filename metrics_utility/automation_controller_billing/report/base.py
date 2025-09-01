@@ -9,8 +9,6 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_sets
-from metrics_utility.automation_controller_billing.helpers import merge_arrays, merge_json_sets
 from metrics_utility.metric_utils import INDIRECT
 
 
@@ -94,12 +92,6 @@ class Base:
             columns += ['host_names_before_dedup', 'host_names_before_dedup_count']
         return dataframe, columns, convert_cols
 
-    def handle_dedup_aggregation(self, agg_dict):
-        """Add deduplication aggregation if experimental dedup is enabled."""
-        if self.has_dedup_enabled():
-            # Use merge_sets since the data already contains sets from initial aggregation
-            agg_dict['host_names_before_dedup'] = ('host_names_before_dedup', merge_sets)
-        return agg_dict
 
     def handle_dedup_columns_for_usage(self, dataframe, columns, convert_cols):
         """Handle deduplication columns for usage tables if experimental dedup is enabled."""
@@ -386,19 +378,15 @@ class Base:
         indirect_nodes = indirect_nodes.with_columns(infra_info.map_elements(lambda x: x['infra_bucket']).alias('infra_bucket'))
         indirect_nodes = indirect_nodes.with_columns(infra_info.map_elements(lambda x: x['device_type']).alias('device_type'))
 
-        # Group by infra_type, infra_bucket, and device_type
-        agg_dict = {
-            'indirect_hosts_unique': ('host_name', 'nunique'),
-            'indirect_hosts_total': ('host_name', 'count'),
-        }
+        # Import centralized aggregation functions
+        from metrics_utility.automation_controller_billing.dataframe_engine.base import get_aggregation_expressions
+        agg_functions = get_aggregation_expressions()
 
-        # Use Polars groupby
-        summary_df = indirect_nodes.group_by(['infra_type', 'infra_bucket', 'device_type']).agg(
-            [
-                pd.col('host_name').n_unique().alias('indirect_hosts_unique'),
-                pd.col('host_name').count().alias('indirect_hosts_total'),
-            ]
-        )
+        # Group by infra_type, infra_bucket, and device_type
+        summary_df = indirect_nodes.group_by(['infra_type', 'infra_bucket', 'device_type']).agg([
+            pd.col('host_name').n_unique().alias('indirect_hosts_unique'),
+            pd.col('host_name').count().alias('indirect_hosts_total'),
+        ])
         summary_df = self.reset_index_if_needed(summary_df)
 
         # Sort by infrastructure type, then bucket, then device type
@@ -473,154 +461,44 @@ class Base:
 
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'host_name' not in dataframe.columns:
-            # Create empty dataframe with expected columns using Polars syntax
-            empty_data = {
-                'host_name': [],
-                'organizations': [],
-                'host_runs': [],
-                'task_runs': [],
-                'first_automation': [],
-                'last_automation': [],
-                'canonical_facts': [],
-                'facts': [],
-                'events': [],
-                'managed_node_types_set': [],
-                'host_names_before_dedup': [],
-            }
-            ccsp_report_dataframe = pd.DataFrame(empty_data)
+            ccsp_report_dataframe = pd.DataFrame({
+                'host_name': [], 'organizations': [], 'host_runs': [], 'task_runs': [],
+                'first_automation': [], 'last_automation': [], 'canonical_facts': [],
+                'facts': [], 'events': [], 'managed_node_types_set': [], 'host_names_before_dedup': []
+            })
         else:
-            agg_dict = {
-                'organizations': ('organization_name', 'nunique'),
-                'host_runs': ('host_runs', 'sum'),
-                'task_runs': ('task_runs', 'sum'),
-                'first_automation': ('first_automation', 'min'),
-                'last_automation': ('last_automation', 'max'),
-                'managed_node_types_set': ('managed_node_types_set', lambda x: merge_arrays(x)),
-                'events': ('events', lambda x: merge_arrays(x)),
-                'canonical_facts': ('canonical_facts', lambda x: merge_json_sets(x)),
-                'facts': ('facts', lambda x: merge_json_sets(x)),
-            }
+            # Import centralized aggregation functions
+            from metrics_utility.automation_controller_billing.dataframe_engine.base import get_aggregation_expressions
+            agg_functions = get_aggregation_expressions()
 
-            # Handle deduplication aggregation if enabled
-            self.handle_dedup_aggregation(agg_dict)
-
-            # Use Polars groupby - simplified to avoid complex field issues
+            # Build aggregation expressions using centralized functions
             agg_exprs = [
                 pd.col('organization_name').n_unique().alias('organizations'),
-                pd.col('host_name').count().alias('host_runs'),  # Count records per host (each record = one host-job combination)
-                pd.col('task_runs').sum().alias('task_runs'),
-                pd.col('first_automation').min().alias('first_automation'),
-                pd.col('last_automation').max().alias('last_automation'),
+                pd.col('host_name').count().alias('host_runs'),
+                agg_functions['sum']('task_runs'),
+                agg_functions['min_non_null']('first_automation'),
+                agg_functions['max_non_null']('last_automation'),
             ]
 
-            # Only add complex field aggregations if they exist and are not causing issues
-            try:
-                # Test if these columns exist and contain valid data
-                if 'managed_node_types_set' in dataframe.columns:
-                    agg_exprs.append(pd.col('managed_node_types_set').first().alias('managed_node_types_set_list'))
-                if 'events' in dataframe.columns:
-                    agg_exprs.append(pd.col('events').first().alias('events'))
-                if 'canonical_facts' in dataframe.columns:
-                    # Use proper merging for canonical facts instead of first() to preserve deduplicated data
-                    from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
-
-                    agg_exprs.append(
-                        pd.col('canonical_facts')
-                        .filter(pd.col('canonical_facts').is_not_null())
-                        .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                        .first()
-                        .alias('canonical_facts_list')
-                    )
-                if 'facts' in dataframe.columns:
-                    # Use proper merging for facts instead of first() to preserve deduplicated data
-                    from metrics_utility.automation_controller_billing.dataframe_engine.base import merge_and_stringify_facts
-
-                    agg_exprs.append(
-                        pd.col('facts')
-                        .filter(pd.col('facts').is_not_null())
-                        .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
-                        .first()
-                        .alias('facts_list')
-                    )
-            except Exception as e:
-                # Continue with basic aggregations only
-                pass
-
-            # Add dedup aggregation if enabled
-            if self.has_dedup_enabled():
-                # Use simpler aggregation for host_names_before_dedup - just collect all non-null lists
-                agg_exprs.append(
-                    pd.col('host_names_before_dedup')
-                    .filter(pd.col('host_names_before_dedup').is_not_null())
-                    .first()
-                    .alias('host_names_before_dedup')
-                )
+            # Add complex field aggregations if columns exist
+            # Note: For report generation, we need List types for collections that will be converted to JSON strings
+            if 'managed_node_types_set' in dataframe.columns:
+                agg_exprs.append(agg_functions['flatten_unique']('managed_node_types_set'))
+            if 'events' in dataframe.columns:
+                agg_exprs.append(agg_functions['flatten_unique']('events'))
+            if 'canonical_facts' in dataframe.columns:
+                agg_exprs.append(agg_functions['merge_json_facts']('canonical_facts'))
+            if 'facts' in dataframe.columns:
+                agg_exprs.append(agg_functions['merge_json_facts']('facts'))
+            if self.has_dedup_enabled() and 'host_names_before_dedup' in dataframe.columns:
+                agg_exprs.append(agg_functions['flatten_unique']('host_names_before_dedup'))
 
             ccsp_report_dataframe = dataframe.group_by('host_name').agg(agg_exprs)
 
-            # Now apply the complex merge functions to the collected lists safely
-            try:
-                complex_columns = []
-
-                # Only process columns that actually exist
-                if 'managed_node_types_set_list' in ccsp_report_dataframe.columns:
-                    complex_columns.append(
-                        ccsp_report_dataframe['managed_node_types_set_list']
-                        .map_elements(lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object)
-                        .alias('managed_node_types_set')
-                    )
-                else:
-                    complex_columns.append(pd.lit([]).alias('managed_node_types_set'))
-
-                if 'events' in ccsp_report_dataframe.columns:
-                    complex_columns.append(
-                        ccsp_report_dataframe['events']
-                        .map_elements(lambda x: merge_arrays([x]) if x is not None else [], return_dtype=pd.Object)
-                        .alias('events')
-                    )
-                else:
-                    complex_columns.append(pd.lit([]).alias('events'))
-
-                if 'canonical_facts_list' in ccsp_report_dataframe.columns:
-                    complex_columns.append(
-                        ccsp_report_dataframe['canonical_facts_list']
-                        .map_elements(lambda x: x if x is not None else '{}', return_dtype=pd.Utf8)
-                        .alias('canonical_facts')
-                    )
-                else:
-                    complex_columns.append(pd.lit('{}').alias('canonical_facts'))
-
-                if 'facts_list' in ccsp_report_dataframe.columns:
-                    complex_columns.append(
-                        ccsp_report_dataframe['facts_list'].map_elements(lambda x: x if x is not None else '{}', return_dtype=pd.Utf8).alias('facts')
-                    )
-                else:
-                    complex_columns.append(pd.lit('{}').alias('facts'))
-
-                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(complex_columns)
-
-            except Exception as e:
-                # Fallback - just use empty values for complex fields
-                pass
-                ccsp_report_dataframe = ccsp_report_dataframe.with_columns(
-                    [
-                        pd.lit([]).alias('managed_node_types_set'),
-                        pd.lit([]).alias('events'),
-                        pd.lit({}).alias('canonical_facts'),
-                        pd.lit({}).alias('facts'),
-                    ]
-                )
-
-            # Drop the temporary list columns safely
-            cols_to_drop = []
-            for col in ['managed_node_types_set', 'events', 'canonical_facts_list', 'facts_list']:
-                if col in ccsp_report_dataframe.columns:
-                    cols_to_drop.append(col)
-            if cols_to_drop:
-                ccsp_report_dataframe = ccsp_report_dataframe.drop(cols_to_drop)
-
         # Convert arrays and dict fields into string, so they can be rendered into xlsx
         convert_cols = ['managed_node_types_set', 'events', 'canonical_facts', 'facts']
+        if self.has_dedup_enabled():
+            convert_cols.append('host_names_before_dedup')
 
         # Reset index only for pandas DataFrames (Polars doesn't have row indices)
         ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
@@ -709,26 +587,18 @@ class Base:
 
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'collection_name' not in dataframe.columns:
-            # Create empty dataframe with expected columns
             ccsp_report_dataframe = pd.DataFrame({'collection_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
-            # Take the content explorer dataframe and extract specific group by
-            agg_dict = {
-                'host_runs_unique': ('host_name', 'nunique'),
-                'host_runs': ('host_composite_id', 'nunique'),
-                'task_runs': ('task_runs', 'sum'),
-                'duration': ('duration', 'sum'),
-            }
+            # Import centralized aggregation functions
+            from metrics_utility.automation_controller_billing.dataframe_engine.base import get_aggregation_expressions
+            agg_functions = get_aggregation_expressions()
 
-            # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['collection_name']).agg(
-                [
-                    pd.col('host_name').n_unique().alias('host_runs_unique'),
-                    pd.col('host_composite_id').n_unique().alias('host_runs'),
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('duration').sum().alias('duration'),
-                ]
-            )
+            ccsp_report_dataframe = dataframe.group_by(['collection_name']).agg([
+                pd.col('host_name').n_unique().alias('host_runs_unique'),
+                pd.col('host_composite_id').n_unique().alias('host_runs'),
+                agg_functions['sum']('task_runs'),
+                agg_functions['sum']('duration'),
+            ])
             # Reset index only for grouped data (collection_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
 
@@ -773,26 +643,18 @@ class Base:
 
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'role_name' not in dataframe.columns:
-            # Create empty dataframe with expected columns
             ccsp_report_dataframe = pd.DataFrame({'role_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
-            # Take the content explorer dataframe and extract specific group by
-            agg_dict = {
-                'host_runs_unique': ('host_name', 'nunique'),
-                'host_runs': ('host_composite_id', 'nunique'),
-                'task_runs': ('task_runs', 'sum'),
-                'duration': ('duration', 'sum'),
-            }
+            # Import centralized aggregation functions
+            from metrics_utility.automation_controller_billing.dataframe_engine.base import get_aggregation_expressions
+            agg_functions = get_aggregation_expressions()
 
-            # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['role_name']).agg(
-                [
-                    pd.col('host_name').n_unique().alias('host_runs_unique'),
-                    pd.col('host_composite_id').n_unique().alias('host_runs'),
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('duration').sum().alias('duration'),
-                ]
-            )
+            ccsp_report_dataframe = dataframe.group_by(['role_name']).agg([
+                pd.col('host_name').n_unique().alias('host_runs_unique'),
+                pd.col('host_composite_id').n_unique().alias('host_runs'),
+                agg_functions['sum']('task_runs'),
+                agg_functions['sum']('duration'),
+            ])
             # Reset index only for grouped data (role_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
 
@@ -838,26 +700,18 @@ class Base:
 
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'module_name' not in dataframe.columns:
-            # Create empty dataframe with expected columns
             ccsp_report_dataframe = pd.DataFrame({'module_name': [], 'host_runs_unique': [], 'host_runs': [], 'task_runs': [], 'duration': []})
         else:
-            # Take the content explorer dataframe and extract specific group by
-            agg_dict = {
-                'host_runs_unique': ('host_name', 'nunique'),
-                'host_runs': ('host_composite_id', 'nunique'),
-                'task_runs': ('task_runs', 'sum'),
-                'duration': ('duration', 'sum'),
-            }
+            # Import centralized aggregation functions  
+            from metrics_utility.automation_controller_billing.dataframe_engine.base import get_aggregation_expressions
+            agg_functions = get_aggregation_expressions()
 
-            # Use Polars groupby
-            ccsp_report_dataframe = dataframe.group_by(['module_name']).agg(
-                [
-                    pd.col('host_name').n_unique().alias('host_runs_unique'),
-                    pd.col('host_composite_id').n_unique().alias('host_runs'),
-                    pd.col('task_runs').sum().alias('task_runs'),
-                    pd.col('duration').sum().alias('duration'),
-                ]
-            )
+            ccsp_report_dataframe = dataframe.group_by(['module_name']).agg([
+                pd.col('host_name').n_unique().alias('host_runs_unique'),
+                pd.col('host_composite_id').n_unique().alias('host_runs'),
+                agg_functions['sum']('task_runs'),
+                agg_functions['sum']('duration'),
+            ])
             # Reset index only for grouped data (module_name becomes a regular column)
             ccsp_report_dataframe = self.reset_index_if_needed(ccsp_report_dataframe)
 

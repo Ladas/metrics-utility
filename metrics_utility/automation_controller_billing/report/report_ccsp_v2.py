@@ -505,12 +505,17 @@ class ReportCCSPv2(Base):
             for cell in row:
                 if cell.value is None:
                     continue
-                if cell.value >= threshold_danger:
-                    cell.fill = danger_background
-                elif cell.value >= threshold_warning:
-                    cell.fill = warning_background
-                else:
-                    cell.fill = success_background
+                # Handle NaT (Not a Time) and other invalid numeric types
+                try:
+                    if cell.value >= threshold_danger:
+                        cell.fill = danger_background
+                    elif cell.value >= threshold_warning:
+                        cell.fill = warning_background
+                    else:
+                        cell.fill = success_background
+                except (TypeError, ValueError):
+                    # Skip cells with non-numeric values (like NaT)
+                    continue
 
         return next_row
 
@@ -653,6 +658,16 @@ class ReportCCSPv2(Base):
         header_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX, bold=True)
         value_font = Font(name=self.FONT, size=10, color=self.BLACK_COLOR_HEX)
 
+        # Debug: Check input dataframe
+        if dataframe is not None and len(dataframe) > 0:
+            print(f'DEBUG JOBS: Input dataframe has {len(dataframe)} records')
+            if 'organization_name' in dataframe.columns:
+                orgs = dataframe['organization_name'].unique().to_list()
+                print(f'DEBUG JOBS: Organizations in input: {orgs}')
+            if 'job_template_name' in dataframe.columns:
+                templates = dataframe['job_template_name'].unique().to_list()
+                print(f'DEBUG JOBS: Job templates in input: {templates[:10]}...')  # First 10
+
         # Handle empty dataframes gracefully
         if dataframe is None or len(dataframe) == 0 or 'job_remote_id' not in dataframe.columns:
             # Create empty dataframe with expected columns
@@ -685,6 +700,14 @@ class ReportCCSPv2(Base):
                     last_run=('job_created', 'max'),
                 )
             # Polars DataFrames don't have indexes - groupby columns automatically become regular columns
+        
+        # Debug: Check aggregated results
+        if hasattr(ccsp_report_dataframe, 'shape') and len(ccsp_report_dataframe) > 0:
+            print(f'DEBUG JOBS: After aggregation: {len(ccsp_report_dataframe)} job records')
+            if 'organization_name' in ccsp_report_dataframe.columns:
+                agg_orgs = ccsp_report_dataframe['organization_name'].unique().to_list()
+                print(f'DEBUG JOBS: Organizations after aggregation: {agg_orgs}')
+        
         # Polars DataFrame column reordering
         columns = ['job_template_name', 'organization_name', 'job_runs', 'host_runs_unique', 'host_runs', 'task_runs', 'first_run', 'last_run']
         if hasattr(ccsp_report_dataframe, 'select'):  # Polars DataFrame
@@ -693,6 +716,12 @@ class ReportCCSPv2(Base):
             ccsp_report_dataframe = ccsp_report_dataframe.select(available_columns)
         else:  # pandas DataFrame fallback
             ccsp_report_dataframe = ccsp_report_dataframe.reindex(columns=columns)
+
+        # Sort by organization name and job template name to ensure consistent ordering for tests
+        if hasattr(ccsp_report_dataframe, 'sort'):  # Polars DataFrame
+            ccsp_report_dataframe = ccsp_report_dataframe.sort(['organization_name', 'job_template_name'])
+        else:  # pandas DataFrame fallback
+            ccsp_report_dataframe = ccsp_report_dataframe.sort_values(['organization_name', 'job_template_name'])
 
         ccsp_report_dataframe = self.rename_dataframe(
             ccsp_report_dataframe,
@@ -744,32 +773,27 @@ class ReportCCSPv2(Base):
             # Create combined column for Polars compatibility
             dataframe = dataframe.with_columns(pd.struct(['job_remote_id', 'install_uuid']).alias('job_remote_id_install_uuid'))
 
-            # For now, simplify the aggregation to avoid complex lambda filtering issues
-            # Pre-compute the filtered counts for each organization before aggregation
-
-            # First, let's try a simpler approach that avoids the complex lambda filtering
-            agg_dict = {
-                'job_runs': ('job_remote_id_install_uuid', 'nunique'),
-                'host_runs_unique': ('host_name', 'nunique'),  # Count all for now, filter later if needed
-                'host_runs': ('host_name', 'count'),  # Count all for now, filter later if needed
-                'task_runs': ('task_runs', 'sum'),
-            }
-
-            # Add the INDIRECT aggregations only if the condition is met
-            if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
-                agg_dict['indirect_host_runs_unique'] = ('host_name', 'nunique')  # Count all for now
-                agg_dict['indirect_host_runs'] = ('host_name', 'count')  # Count all for now
-                print(f'DEBUG: Added indirect columns to agg_dict')
-            else:
-                print(f'DEBUG: Skipping indirect columns (not in optional sheets)')
+            # Import constants for managed node types
+            from metrics_utility.metric_utils import DIRECT, INDIRECT
+            
+            # Filter dataframe into direct and indirect parts for proper aggregation
+            direct_data = dataframe.filter(pd.col('managed_node_type') == DIRECT) if hasattr(dataframe, 'filter') else dataframe[dataframe['managed_node_type'] == DIRECT]
+            indirect_data = dataframe.filter(pd.col('managed_node_type') == INDIRECT) if hasattr(dataframe, 'filter') else dataframe[dataframe['managed_node_type'] == INDIRECT]
+            
+            # For pandas: We'll use separate aggregations for direct and indirect data
+            # This avoids complex lambda filtering and ensures accurate counts
 
             # Use Polars-compatible groupby without dropna parameter
             if hasattr(dataframe, 'group_by'):  # Polars DataFrame
-                # Build Polars aggregation expressions
+                # Import constants for managed node types
+                from metrics_utility.metric_utils import DIRECT, INDIRECT
+                
+                # Build Polars aggregation expressions with proper managed_node_type filtering
                 agg_exprs = [
                     pd.col('job_remote_id_install_uuid').n_unique().alias('job_runs'),
-                    pd.col('host_name').n_unique().alias('host_runs_unique'),
-                    pd.col('host_name').count().alias('host_runs'),
+                    # Only count DIRECT managed nodes for base columns
+                    pd.col('host_name').filter(pd.col('managed_node_type') == DIRECT).n_unique().alias('host_runs_unique'),
+                    pd.col('host_name').filter(pd.col('managed_node_type') == DIRECT).count().alias('host_runs'),
                     pd.col('task_runs').sum().alias('task_runs'),
                 ]
 
@@ -777,8 +801,9 @@ class ReportCCSPv2(Base):
                 if optional_sheets and 'indirectly_managed_nodes' in optional_sheets:
                     agg_exprs.extend(
                         [
-                            pd.col('host_name').n_unique().alias('indirect_host_runs_unique'),
-                            pd.col('host_name').count().alias('indirect_host_runs'),
+                            # Only count INDIRECT managed nodes for indirect columns
+                            pd.col('host_name').filter(pd.col('managed_node_type') == INDIRECT).n_unique().alias('indirect_host_runs_unique'),
+                            pd.col('host_name').filter(pd.col('managed_node_type') == INDIRECT).count().alias('indirect_host_runs'),
                         ]
                     )
                     print(f'DEBUG: Added indirect columns to agg_exprs')
@@ -787,7 +812,34 @@ class ReportCCSPv2(Base):
 
                 ccsp_report_dataframe = dataframe.group_by('organization_name').agg(agg_exprs)
             else:  # pandas DataFrame fallback
-                ccsp_report_dataframe = dataframe.groupby('organization_name', dropna=False).agg(**agg_dict)
+                # For pandas, aggregate direct and indirect data separately then combine
+                import pandas as pandas_lib
+                
+                # Aggregate direct managed node data
+                direct_agg = direct_data.groupby('organization_name', dropna=False).agg({
+                    'job_remote_id_install_uuid': 'nunique',
+                    'host_name': ['nunique', 'count'],
+                    'task_runs': 'sum',
+                }).rename(columns={
+                    ('job_remote_id_install_uuid', 'nunique'): 'job_runs',
+                    ('host_name', 'nunique'): 'host_runs_unique', 
+                    ('host_name', 'count'): 'host_runs',
+                    ('task_runs', 'sum'): 'task_runs'
+                }) if len(direct_data) > 0 else pandas_lib.DataFrame()
+                
+                # Aggregate indirect managed node data if needed
+                if optional_sheets and 'indirectly_managed_nodes' in optional_sheets and len(indirect_data) > 0:
+                    indirect_agg = indirect_data.groupby('organization_name', dropna=False).agg({
+                        'host_name': ['nunique', 'count'],
+                    }).rename(columns={
+                        ('host_name', 'nunique'): 'indirect_host_runs_unique',
+                        ('host_name', 'count'): 'indirect_host_runs'
+                    })
+                    
+                    # Combine direct and indirect aggregations
+                    ccsp_report_dataframe = direct_agg.join(indirect_agg, how='outer').fillna(0)
+                else:
+                    ccsp_report_dataframe = direct_agg
             # Polars DataFrames don't have indexes - groupby columns automatically become regular columns
 
         # Build columns list dynamically based on what actually exists in the dataframe
