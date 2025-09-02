@@ -428,8 +428,8 @@ class DataframeJobhostSummaryUsage(Base):
             'last_automation': ('created', 'max_non_null'),   # max(created) -> last_automation
             'job_created': ('job_created', 'max_non_null'),   # Latest job creation time (null-aware)
             'managed_node_type': 'min',  # Use lowest managed node type (DIRECT=0, INDIRECT=1)
-            'canonical_facts': 'merge_json_facts',  # Merge JSON fact strings
-            'facts': 'merge_json_facts',  # Merge JSON fact strings
+            'canonical_facts': 'merge_json_facts_group',  # FAST: Merge individual JSON objects during initial grouping
+            'facts': 'merge_json_facts_group',  # FAST: Merge individual JSON objects during initial grouping
             # Aggregate managed_node_type_string into managed_node_types_set as a list
             'managed_node_types_set': ('managed_node_type_string', 'unique'),  # Convert string column to unique list
             'events': 'merge_lists_unique',  # Merge event lists with unique values
@@ -453,8 +453,8 @@ class DataframeJobhostSummaryUsage(Base):
             'last_automation': ('last_automation', 'max_non_null'),    # Latest timestamp across rollups (null-aware)
             'job_created': ('job_created', 'max_non_null'),           # Latest job creation time across rollups (null-aware)
             'managed_node_type': 'min',  # Use lowest managed node type across rollups
-            'canonical_facts': 'merge_json_facts',  # Merge JSON fact strings from different rollups
-            'facts': 'merge_json_facts',  # Merge JSON fact strings from different rollups
+            'canonical_facts': 'merge_json_facts_regroup',  # FAST: Merge list-format JSON from different rollups
+            'facts': 'merge_json_facts_regroup',  # FAST: Merge list-format JSON from different rollups
             'managed_node_types_set': 'flatten_unique',  # Flatten and get unique from List columns
             'events': 'flatten_unique',  # Flatten and get unique from List columns
             'host_names_before_dedup': 'flatten_unique',  # Flatten and get unique from List columns

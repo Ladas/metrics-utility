@@ -109,30 +109,101 @@ class Base:
         return labels
 
     def convert_cell(self, cell):
+        # DEBUG: Check for web01 data corruption - handle Series safely
+        has_web01 = False
+        try:
+            has_web01 = 'web01' in str(cell)
+        except:
+            pass
+            
+        if has_web01:
+            pass # Debug disabled
+            # print(f'!!!!! CONVERT_CELL DEBUG: Processing cell with web01 data !!!!!')
+            # print(f'  Cell type: {type(cell)}')
+            # print(f'  Cell value: {cell}')
+        
         # If the cell is a Polars Series (from List column), convert to Python list first
         if hasattr(cell, 'to_list'):  # Polars Series object
             cell = cell.to_list()
+            if has_web01:
+                pass # print(f'  After to_list(): {cell}')
 
         # Handle canonical_facts and facts - they should already be JSON strings at this point
 
         # If the cell is a dictionary, convert each set value to a sorted list, then dump as a JSON string.
         if isinstance(cell, dict):
-            new_cell = {k: sorted(list(v)) if isinstance(v, set) else v for k, v in cell.items()}
+            if has_web01:
+                pass # print(f'  Processing as dict: {cell}')
+            # Convert sets to lists and filter out keys with empty arrays
+            new_cell = {}
+            for k, v in cell.items():
+                if isinstance(v, set):
+                    processed_value = sorted(list(v))
+                else:
+                    processed_value = v
+                
+                # Only include keys that have non-empty values
+                # This filters out keys like 'ansible_machine_id': [] or 'ansible_product_serial': []
+                if processed_value not in [[], None, ""]:
+                    new_cell[k] = processed_value
             result = json.dumps(new_cell)
+            if has_web01:
+                pass # print(f'  Dict result: {result}')
             return result
         # If the cell itself is a set, convert it to a sorted list and then to a JSON string.
         elif isinstance(cell, set):
+            if has_web01:
+                print(f'  Processing as set: {cell}')
             result = json.dumps(sorted(list(cell)))
+            if has_web01:
+                print(f'  Set result: {result}')
             return result
         # If the cell is a list, convert any set elements inside to sorted lists and dump as a JSON string.
         elif isinstance(cell, list):
+            if has_web01:
+                print(f'  Processing as list: {cell}')
             new_cell = [sorted(list(item)) if isinstance(item, set) else item for item in cell]
             # Sort the list itself if it contains strings
             if new_cell and all(isinstance(item, str) for item in new_cell):
                 new_cell = sorted(new_cell)
             result = json.dumps(new_cell)
+            if has_web01:
+                print(f'  List result: {result}')
             return result
+        # If the cell is a string that looks like JSON, try to parse and filter it
+        elif isinstance(cell, str) and cell.strip().startswith('{') and cell.strip().endswith('}'):
+            if has_web01:
+                print(f'  Processing as JSON string: {cell}')
+            try:
+                parsed_dict = json.loads(cell)
+                if isinstance(parsed_dict, dict):
+                    # Apply the same filtering logic as dictionary processing
+                    filtered_dict = {}
+                    for k, v in parsed_dict.items():
+                        if isinstance(v, set):
+                            processed_value = sorted(list(v))
+                        else:
+                            processed_value = v
+                        
+                        # Only include keys that have non-empty values
+                        if processed_value not in [[], None, ""]:
+                            filtered_dict[k] = processed_value
+                    
+                    result = json.dumps(filtered_dict)
+                    if has_web01:
+                        print(f'  JSON string result: {result}')
+                    return result
+                else:
+                    # Not a dictionary, return unchanged
+                    return cell
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # Not valid JSON, return unchanged
+                if has_web01:
+                    print(f'  Invalid JSON, returning unchanged: {cell}')
+                return cell
         # Otherwise, return the cell unchanged.
+        if has_web01:
+            print(f'  Returning unchanged: {cell}')
         return cell
 
     def rename_dataframe(self, dataframe, columns_mapping):

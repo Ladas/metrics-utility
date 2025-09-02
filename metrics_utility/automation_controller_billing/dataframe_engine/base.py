@@ -136,10 +136,28 @@ def get_aggregation_expressions() -> Dict[str, Any]:
         # ========================================
         # SPECIALIZED AGGREGATIONS FOR FACTS AND COMPLEX DATA
         # ========================================
-        'merge_json_facts': lambda col: (
+        'merge_json_facts_group': lambda col: (
+            # OPTIMIZED: For initial CSV grouping - merge individual JSON objects
             pd.col(col)
-            .filter(pd.col(col).is_not_null())
-            .map_batches(lambda s: pd.Series([merge_and_stringify_facts(s.to_list())]), return_dtype=pd.Utf8)
+            .filter(pd.col(col).is_not_null() & (pd.col(col) != ""))
+            .map_batches(lambda s: pd.Series([merge_json_facts_optimized_group(s.to_list())]), return_dtype=pd.Utf8)
+            .first()
+            .alias(col)
+        ),
+        'merge_json_facts_regroup': lambda col: (
+            # OPTIMIZED: For rollup regrouping - merge already processed list-format JSON
+            pd.col(col)
+            .filter(pd.col(col).is_not_null() & (pd.col(col) != ""))
+            .map_batches(lambda s: pd.Series([merge_json_facts_optimized_regroup(s.to_list())]), return_dtype=pd.Utf8)
+            .first()
+            .alias(col)
+        ),
+        # Legacy alias for backward compatibility - FIXED: Use proper merging instead of .first()
+        'merge_json_facts': lambda col: (
+            # FIXED: Use merge_json_facts_regroup for proper merging instead of .first()
+            pd.col(col)
+            .filter(pd.col(col).is_not_null() & (pd.col(col) != ""))
+            .map_batches(lambda s: pd.Series([merge_json_facts_optimized_regroup(s.to_list())]), return_dtype=pd.Utf8)
             .first()
             .alias(col)
         ),
@@ -410,13 +428,13 @@ def json_to_list_format(json_str: Union[str, None]) -> Dict[str, List[str]]:
         result = {}
         for key, value in parsed.items():
             if isinstance(value, list):
-                # Filter out "NA" values from existing lists
-                filtered_values = [v for v in value if v != "NA"]
+                # Filter out "NA" values, empty strings, and null values from existing lists
+                filtered_values = [v for v in value if v != "NA" and v != "" and v is not None]
                 if filtered_values:  # Only include non-empty lists
                     result[key] = filtered_values
             else:
-                # Filter out "NA" values from single values
-                if value != "NA":
+                # Filter out "NA" values, empty strings, and null values from single values
+                if value != "NA" and value != "" and value is not None:
                     result[key] = [value]  # Convert to list only if not "NA"
         return result
     except:
@@ -463,12 +481,140 @@ def merge_list_format_dicts(dict_list: List[Dict[str, List[str]]]) -> Dict[str, 
     # Also remove keys with empty lists (fields that had no actual values)
     final_merged = {}
     for key in merged:
-        filtered = [x for x in merged[key] if x is not None]
+        # Filter out "NA" values, empty strings, and null values
+        filtered = [x for x in merged[key] if x is not None and x != "NA" and x != ""]
         unique_values = list(dict.fromkeys(filtered))
         if unique_values:  # Only keep keys that have actual values
             final_merged[key] = sorted(unique_values)
 
     return final_merged
+
+
+def merge_json_facts_optimized_group(json_strings: List[str]) -> str:
+    """OPTIMIZED: Fast merge for initial CSV grouping where most groups have single records.
+    
+    This optimized version handles the common case of single records efficiently
+    while falling back to full merging only when necessary.
+    
+    Args:
+        json_strings: List of JSON strings from CSV records
+        
+    Returns:
+        JSON string with merged facts in list format
+    """
+    # Filter out null/empty strings
+    valid_strings = [s for s in json_strings if s and s.strip()]
+    
+    if not valid_strings:
+        return ""
+    
+    # FAST PATH: Single record (most common case)
+    if len(valid_strings) == 1:
+        return json_to_list_format_string(valid_strings[0])
+    
+    # MERGE PATH: Multiple records need proper merging to maintain functionality
+    import json
+    parsed_dicts = []
+    for json_str in valid_strings:
+        list_format_dict = json_to_list_format(json_str)
+        if list_format_dict:
+            parsed_dicts.append(list_format_dict)
+    
+    # Merge all list format dictionaries
+    merged = merge_list_format_dicts(parsed_dicts)
+    return json.dumps(merged)
+
+
+def merge_json_facts_optimized_regroup(json_strings: List[str]) -> str:
+    """OPTIMIZED: Fast merge for rollup regrouping where facts are already in list format.
+    
+    This optimized version handles already-processed list format facts
+    and merges them efficiently.
+    
+    Args:
+        json_strings: List of JSON strings in list format from rollup data
+        
+    Returns:
+        JSON string with merged facts in list format
+    """
+    # DEBUG: Check if we're getting web01 data during regroup after dedup
+    has_web01 = any('web01' in str(s) for s in json_strings if s)
+    if has_web01:
+        print(f'!!!!! REGROUP merge_json_facts_optimized_regroup DEBUG: Called with {len(json_strings)} items !!!!!')
+        for i, s in enumerate(json_strings):
+            print(f'  Item {i}: {s}')
+    
+    # Filter out null/empty strings
+    valid_strings = [s for s in json_strings if s and s.strip()]
+    
+    if has_web01:
+        print(f'!!!!! REGROUP: After filtering, {len(valid_strings)} valid strings !!!!!')
+    
+    if not valid_strings:
+        if has_web01:
+            print('!!!!! REGROUP: Returning empty string (no valid input) !!!!!')
+        return ""
+    
+    # FAST PATH: Single record (most common case)
+    if len(valid_strings) == 1:
+        result = valid_strings[0]  # Already in list format
+        if has_web01:
+            print(f'!!!!! REGROUP: Fast path - single record: {result} !!!!!')
+        return result
+    
+    # MERGE PATH: Multiple list-format records need merging
+    if has_web01:
+        print(f'!!!!! REGROUP: Merge path - {len(valid_strings)} records !!!!!')
+    
+    import json
+    parsed_dicts = []
+    for json_str in valid_strings:
+        try:
+            parsed = json.loads(json_str)
+            if parsed:
+                parsed_dicts.append(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    
+    # Merge all list format dictionaries
+    merged = merge_list_format_dicts(parsed_dicts)
+    result = json.dumps(merged)
+    
+    if has_web01:
+        print(f'!!!!! REGROUP: Final merged result: {result} !!!!!')
+    
+    return result
+
+
+def json_to_list_format_string(json_str: str) -> str:
+    """Convert a single JSON string to list format efficiently.
+    
+    Fast path for converting individual JSON objects to list format
+    without going through the full merge process.
+    
+    Args:
+        json_str: Single JSON string
+        
+    Returns:
+        JSON string in list format
+    """
+    import json
+    try:
+        parsed = json.loads(json_str)
+        if not parsed:
+            return "{}"
+        
+        # Convert to list format
+        list_format = {}
+        for key, value in parsed.items():
+            if isinstance(value, list):
+                list_format[key] = value
+            else:
+                list_format[key] = [value]
+        
+        return json.dumps(list_format)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "{}"
 
 
 def merge_and_stringify_facts(json_strings: List[str]) -> str:

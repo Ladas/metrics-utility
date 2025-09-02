@@ -313,8 +313,8 @@ class DataframeInventoryScope(Base):
         return {
             # Data columns aggregation rules for initial CSV processing
             'last_automation': 'max_non_null',  # Latest automation timestamp (null-aware)
-            'canonical_facts': 'merge_json_facts',  # Take first list of facts for single batch processing
-            'facts': 'merge_json_facts',  # Take first list of facts for single batch processing
+            'canonical_facts': 'merge_json_facts_group',  # FAST: Merge individual JSON objects during initial grouping
+            'facts': 'merge_json_facts_group',  # FAST: Merge individual JSON objects during initial grouping
             'organizations': 'unique',  # Collect unique organization names
             'inventories': 'unique',  # Collect unique inventory names
             'serials': 'unique',  # Collect unique serial numbers
@@ -332,8 +332,8 @@ class DataframeInventoryScope(Base):
         """
         return {
             'last_automation': 'max_non_null',  # Latest automation timestamp across rollups (null-aware)
-            'canonical_facts': 'merge_json_facts',  # Merge JSON objects from different rollups
-            'facts': 'merge_json_facts',  # Merge JSON objects from different rollups
+            'canonical_facts': 'merge_json_facts_regroup',  # FAST: Merge list-format JSON from different rollups
+            'facts': 'merge_json_facts_regroup',  # FAST: Merge list-format JSON from different rollups
             'organizations': 'flatten_unique',  # Flatten and get unique from List columns
             'inventories': 'flatten_unique',  # Flatten and get unique from List columns
             'serials': 'flatten_unique',  # Flatten and get unique from List columns
