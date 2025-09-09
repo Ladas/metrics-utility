@@ -130,3 +130,210 @@ services:
 
         tail -f /dev/null
       '
+
+  # Observability Stack: Tracing, Metrics, and Monitoring
+  tempo-init:
+    image: grafana/tempo:latest
+    user: root
+    entrypoint:
+      - "chown"
+      - "10001:10001"
+      - "/tmp/tempo"
+    volumes:
+      - tempo-data:/tmp/tempo
+    profiles: ["otel"]
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    user: "10001:10001"
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/tmp/tempo
+    ports:
+      - "3200:3200"   # tempo
+      - "4317:4317"   # otlp grpc
+      - "4318:4318"   # otlp http
+      - "9095:9095"   # tempo grpc
+      - "14268:14268" # jaeger ingest
+    depends_on:
+      tempo-init:
+        condition: service_completed_successfully
+    profiles: ["otel"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus-data:/prometheus
+    depends_on:
+      - node-exporter
+      - cadvisor
+    profiles: ["otel"]
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.systemd'
+      - '--collector.processes'
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    privileged: true
+    restart: unless-stopped
+    profiles: ["otel"]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    command:
+      - '--port=8080'
+      - '--logtostderr'
+      - '--docker_only=true'
+      - '--housekeeping_interval=30s'
+      - '--disable_metrics=disk,tcp,udp,percpu,sched,process'
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    restart: unless-stopped
+    profiles: ["otel"]
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - tempo
+      - prometheus
+    profiles: ["otel"]
+
+  # Updated metrics-utility-env with OpenTelemetry
+  metrics-utility-env-otel:
+    build:
+      context: .
+      args:
+        SRC_MOUNT: /app
+    image: "mirror.gcr.io/python"
+    container_name: metrics-utility-env-otel
+    depends_on:
+      postgres-wait:
+        condition: service_completed_successfully
+      tempo:
+        condition: service_started
+    volumes:
+      - ../../:/app
+    working_dir: /app
+    profiles: ["otel"]
+    environment:
+      METRICS_UTILITY_BUCKET_ACCESS_KEY: "myuseraccesskey"
+      METRICS_UTILITY_BUCKET_ENDPOINT: "http://minio:9000"
+      METRICS_UTILITY_BUCKET_NAME: "metricsutilitys3"
+      METRICS_UTILITY_BUCKET_REGION: "us-east-1"
+      METRICS_UTILITY_BUCKET_SECRET_KEY: "myusersecretkey"
+      METRICS_UTILITY_DB_HOST: "postgres"
+      # OpenTelemetry configuration
+      OTEL_TRACES_ENABLED: "true"
+      OTEL_SERVICE_NAME: "metrics-service"
+      OTEL_SERVICE_VERSION: "0.1.0"
+      OTEL_ENVIRONMENT: "development"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=metrics-service,service.version=0.1.0,deployment.environment=development,service.instance.id=dev-docker"
+      PYTHONPATH: "/app"
+    entrypoint: |
+      sh -c '
+        set -e
+
+        echo "Setting up metrics utility with OpenTelemetry..."
+
+        pip install uv
+        uv sync
+
+        echo "OpenTelemetry environment:"
+        env | grep ^OTEL | sort
+
+        echo "Metrics utility ready with tracing enabled. Connect to Grafana at http://localhost:3000 (admin/admin)"
+        echo "Tempo available at http://localhost:3200"
+
+        tail -f /dev/null
+      '
+
+  # metrics-utility-env3 for running tests
+  metrics-utility-env3:
+    build:
+      context: .
+      args:
+        SRC_MOUNT: /app
+    image: "mirror.gcr.io/python"
+    container_name: metrics-utility-env3
+    depends_on:
+      postgres-wait:
+        condition: service_completed_successfully
+    volumes:
+      - ../../:/app
+    working_dir: /app
+    profiles: ["env3"]
+    environment:
+      METRICS_UTILITY_BUCKET_ACCESS_KEY: "myuseraccesskey"
+      METRICS_UTILITY_BUCKET_ENDPOINT: "http://minio:9000"
+      METRICS_UTILITY_BUCKET_NAME: "metricsutilitys3"
+      METRICS_UTILITY_BUCKET_REGION: "us-east-1"
+      METRICS_UTILITY_BUCKET_SECRET_KEY: "myusersecretkey"
+      METRICS_UTILITY_DB_HOST: "postgres"
+      PYTHONPATH: "/app"
+    entrypoint: |
+      sh -c '
+        set -e
+
+        echo "Setting up metrics utility env3 for testing..."
+
+        pip install uv
+        uv sync
+
+        echo "Metrics utility env3 ready for testing"
+
+        tail -f /dev/null
+      '
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  tempo-data:

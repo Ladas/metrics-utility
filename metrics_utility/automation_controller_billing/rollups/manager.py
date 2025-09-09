@@ -669,7 +669,7 @@ class RollupManager:
 
         # Optimize data types for parquet storage
         df_for_parquet = df.copy()
-        
+
         # Reset index to ensure all unique_index_columns are stored as regular columns in parquet
         # This is critical for rollup loading - without this, index columns are lost and records get incorrectly merged
         if df_for_parquet.index.names != [None]:  # Has named index (MultiIndex or single named index)

@@ -14,9 +14,18 @@ dependencies = [
     "kubernetes>=33.1.0",
     "openpyxl==3.1.2",
     "pandas>=2.2.3",
+    "psutil>=5.9.0",
     "psycopg==3.2.3",
+    "pyarrow>=21.0.0",
     "requests==2.32.3",
     "setuptools==70.3.0",
+    # OpenTelemetry dependencies
+    "opentelemetry-api>=1.21.0",
+    "opentelemetry-sdk>=1.21.0",
+    "opentelemetry-exporter-otlp>=1.21.0",
+    "opentelemetry-instrumentation-django>=0.42b0",
+    "opentelemetry-instrumentation-requests>=0.42b0",
+    "opentelemetry-instrumentation-psycopg>=0.42b0",
 ]
 requires-python = ">=3.11"
 

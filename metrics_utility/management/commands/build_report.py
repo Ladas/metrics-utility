@@ -218,38 +218,38 @@ class Command(BaseCommand):
 
         with tracer.start_as_current_span(SpanNames.REPORT_DEDUPLICATION) as dedup_span:
             add_span_attributes(dedup_span, **{'deduplication.algorithm': extra_params.get('deduplicator', 'default')})
-            
+
             # Create dataframe instances for deduplication (needed to call dedup methods)
             dataframe_instances = {}
             dataframes_by_class_name = {}
-            
+
             # Map standard names to class names for deduplication
             class_name_mapping = {
                 'job_host_summary': 'DataframeJobhostSummaryUsage',
-                'main_jobevent': 'DataframeContentUsage', 
+                'main_jobevent': 'DataframeContentUsage',
                 'main_host': 'DataframeInventoryScope',
-                'data_collection_status': 'DataframeCollectionStatus'
+                'data_collection_status': 'DataframeCollectionStatus',
             }
-            
+
             for df_name, dataframe_data in dataframes.items():
                 if dataframe_data is not None:
                     class_name = class_name_mapping.get(df_name, df_name)
-                    
+
                     # Create dataframe instance
                     dataframe_class = self._get_dataframe_class_for_dedup(class_name)
                     if dataframe_class:
                         dataframe_instances[class_name] = dataframe_class(extractor=extractor, month=month, extra_params=extra_params)
                         dataframes_by_class_name[class_name] = dataframe_data
-            
+
             # Create dedup factory and pass DataFrames keyed by class names
             dedup = DedupFactory(dataframes=dataframes_by_class_name, extra_params=extra_params).create()
-            
+
             # Set up the deduplicator with both the actual DataFrames and the instances
             dedup.dataframes = dataframes_by_class_name
             dedup.dataframe_instances = dataframe_instances
-            
+
             deduplicated_dataframes = dedup.run()
-            
+
             # Map deduplicated results back to standard names for reports
             reverse_mapping = {v: k for k, v in class_name_mapping.items()}
             dataframes = {}
@@ -342,13 +342,6 @@ class Command(BaseCommand):
                 # Renewal guidance specific params
                 'report_renewal_guidance_dedup_iterations': os.getenv('REPORT_RENEWAL_GUIDANCE_DEDUP_ITERATIONS', '3'),
                 'report_organization_filter': get_organization_filter(),
-                # optional bits
-                'optional_sheets': os.getenv(
-                    'METRICS_UTILITY_OPTIONAL_CCSP_REPORT_SHEETS',
-                    'ccsp_summary,managed_nodes,usage_by_organizations,usage_by_collections,usage_by_roles,usage_by_modules',
-                )
-                .rstrip(',')
-                .split(','),
             }
         )
         return base
@@ -357,16 +350,22 @@ class Command(BaseCommand):
         """Get the dataframe class for deduplication instance creation"""
         try:
             if class_name == 'DataframeJobhostSummaryUsage':
-                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_jobhost_summary_usage import DataframeJobhostSummaryUsage
+                from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_jobhost_summary_usage import (
+                    DataframeJobhostSummaryUsage,
+                )
+
                 return DataframeJobhostSummaryUsage
             elif class_name == 'DataframeContentUsage':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_content_usage import DataframeContentUsage
+
                 return DataframeContentUsage
             elif class_name == 'DataframeInventoryScope':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_inventory_scope import DataframeInventoryScope
+
                 return DataframeInventoryScope
             elif class_name == 'DataframeCollectionStatus':
                 from metrics_utility.automation_controller_billing.dataframe_engine.dataframe_collection_status import DataframeCollectionStatus
+
                 return DataframeCollectionStatus
             else:
                 return None

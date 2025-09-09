@@ -247,14 +247,15 @@ class Base:
                 except TypeError as e:
                     if 'not supported between instances' in str(e):
                         import logging
+
                         logger = logging.getLogger(__name__)
                         logger.warning(f'Mixed type comparison detected for column {col} during min operation: {e}. Using safe comparison fallback.')
-                        
+
                         # Handle mixed type comparison by using apply with proper NaN handling
                         def safe_min(row):
                             val_x = row[col_x]
                             val_y = row[col_y]
-                            
+
                             # If both are NaN, return NaN
                             if pd.isna(val_x) and pd.isna(val_y):
                                 return pd.NaT if 'datetime' in str(type(val_x)) or 'datetime' in str(type(val_y)) else None
@@ -266,7 +267,7 @@ class Base:
                             # Both are valid, compare them
                             else:
                                 return min(val_x, val_y)
-                        
+
                         df[col] = df.apply(safe_min, axis=1)
                     else:
                         raise  # Re-raise if it's a different TypeError
@@ -281,9 +282,10 @@ class Base:
                 except TypeError as e:
                     if 'not supported between instances' in str(e):
                         import logging
+
                         logger = logging.getLogger(__name__)
                         logger.warning(f'Mixed type comparison detected for column {col} during max operation: {e}. Using safe comparison fallback.')
-                        
+
                         # Handle mixed type comparison by using apply with proper NaN handling
                         def safe_max(row):
                             val_x = row[col_x]
@@ -507,7 +509,6 @@ class Base:
 
         return result
 
-
     @staticmethod
     def unique_index_columns():
         pass
@@ -657,10 +658,7 @@ class Base:
             raw_cast_types = self.__class__.cast_types() or {}
 
         # Filter out manually converted columns and columns that don't exist
-        available_cast_types = {
-            k: v for k, v in raw_cast_types.items()
-            if k in df.columns and k not in manually_converted_columns
-        }
+        available_cast_types = {k: v for k, v in raw_cast_types.items() if k in df.columns and k not in manually_converted_columns}
 
         if available_cast_types:
             df = self.cast_dataframe(df, available_cast_types)

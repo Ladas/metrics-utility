@@ -192,7 +192,7 @@ class RollupReader:
                         try:
                             # Load parquet data directly - minimal processing to avoid corruption
                             df = pd.read_parquet(parquet_path)
-                            
+
                             # Only do minimal transformations for specific dataframes
                             if df_name == 'DataframeJobhostSummaryUsage':
                                 # Convert lists back to sets for known set columns (critical for proper aggregation)
@@ -300,7 +300,7 @@ class RollupReader:
 
     def _convert_lists_to_sets(self, df: pd.DataFrame, dataframe_name: str) -> pd.DataFrame:
         """Convert lists back to sets for known set columns after loading from parquet.
-        
+
         When storing to parquet, sets are converted to sorted lists. This method converts them back.
         """
         # Define which columns should be sets for each dataframe type
@@ -310,9 +310,9 @@ class RollupReader:
             'DataframeContentUsage': ['playbooks', 'organizations'],
             'DataframeCollectionStatus': [],  # No set columns in collection status
         }
-        
+
         set_columns = set_columns_map.get(dataframe_name, [])
-        
+
         for col in set_columns:
             if col in df.columns:
                 # Convert lists/arrays to sets, handling None values and numpy arrays properly
@@ -327,9 +327,9 @@ class RollupReader:
                         return set(x)
                     else:
                         return x
-                
+
                 df[col] = df[col].apply(convert_to_set)
-        
+
         return df
 
     def _normalize_dataframe_types(self, df: pd.DataFrame, dataframe_name: str) -> pd.DataFrame:
@@ -345,7 +345,7 @@ class RollupReader:
             'DataframeContentUsage': [],
             'DataframeCollectionStatus': [],  # No JSON columns in collection status
         }
-        
+
         json_columns = json_columns_map.get(dataframe_name, [])
 
         # Handle JSON fields that were serialized for parquet storage - only for specified columns
@@ -373,7 +373,7 @@ class RollupReader:
         for col in df_normalized.columns:
             if df_normalized[col].dtype == 'object':
                 sample_val = df_normalized[col].dropna().iloc[0] if not df_normalized[col].dropna().empty else None
-                
+
                 if isinstance(sample_val, np.ndarray):
                     # Convert numpy arrays to lists for Excel compatibility
                     df_normalized[col] = df_normalized[col].apply(lambda x: x.tolist() if x is not None and hasattr(x, 'tolist') else x)
@@ -615,7 +615,8 @@ class RollupReader:
         if not dataframe_class:
             raise ValueError(f'Unknown dataframe class for {dataframe_name} - cannot perform merge operation')
 
-        # Create dataframe instance for operations
+        # Create dataframe instance for operations with minimal required context
+        # Note: extractor=None is acceptable for merge operations as they only need the class methods
         df_instance = dataframe_class(extractor=None, month=None, extra_params={})
 
         # If only one dataframe, return as-is (load_from_parquet already handled schema)

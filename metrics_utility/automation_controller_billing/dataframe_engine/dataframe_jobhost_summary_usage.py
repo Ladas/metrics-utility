@@ -38,7 +38,7 @@ class DataframeJobhostSummaryUsage(Base):
             # Check which data source we have and determine managed_node_type first
             job_host_data = batch_data.get('job_host_summary')
             indirect_data = batch_data.get('indirect_nodes')
-            
+
             # Determine which data to use and corresponding node type
             if job_host_data is not None and not (hasattr(job_host_data, 'empty') and job_host_data.empty):
                 billing_data = job_host_data
@@ -89,7 +89,7 @@ class DataframeJobhostSummaryUsage(Base):
         # Handle empty DataFrame case
         if billing_data is None or (hasattr(billing_data, 'empty') and billing_data.empty):
             return self.empty()
-        
+
         billing_data['managed_node_type'] = managed_node_type
         billing_data['managed_node_type_string'] = MANAGED_NODE_TYPES[managed_node_type]
 
@@ -109,7 +109,7 @@ class DataframeJobhostSummaryUsage(Base):
         # Store ansible_host || hostname for tracking deduplication impact
         # Always populate host_names_before_dedup with the actual host name for consistent tracking
         billing_data['host_names_before_dedup'] = billing_data['host_name']
-        
+
         # Initialize host_runs to 1 for each record (will be summed during grouping)
         billing_data['host_runs'] = 1
 
@@ -152,7 +152,7 @@ class DataframeJobhostSummaryUsage(Base):
         elif managed_node_type == INDIRECT:
             # For indirect nodes, task_runs is always 1 (each record represents one task)
             billing_data['task_runs'] = 1
-            
+
             # For indirect nodes, preserve existing canonical_facts and facts from CSV data
             # Only initialize with empty dicts if they don't exist or are null
             if 'canonical_facts' not in billing_data.columns:
@@ -160,13 +160,13 @@ class DataframeJobhostSummaryUsage(Base):
             else:
                 # Fill null values with empty dicts, but preserve existing data
                 billing_data['canonical_facts'] = billing_data['canonical_facts'].fillna({}).apply(lambda x: x if x else {})
-            
+
             if 'facts' not in billing_data.columns:
                 billing_data['facts'] = {}
             else:
                 # Fill null values with empty dicts, but preserve existing data
                 billing_data['facts'] = billing_data['facts'].fillna({}).apply(lambda x: x if x else {})
-            
+
             # Load the events array safely if it exists
             if 'events' in billing_data.columns:
                 parse_start = time.time()
@@ -187,7 +187,7 @@ class DataframeJobhostSummaryUsage(Base):
         billing_data['created'] = pd.to_datetime(billing_data['created'], format='ISO8601', errors='coerce').dt.tz_localize(None)
 
         if 'job_created' in billing_data:
-            # Ensure job_created column exists and handle NaN values properly  
+            # Ensure job_created column exists and handle NaN values properly
             billing_data['job_created'] = billing_data['job_created'].astype(str)
             billing_data['job_created'] = pd.to_datetime(billing_data['job_created'], format='ISO8601', errors='coerce').dt.tz_localize(None)
         else:
@@ -303,12 +303,12 @@ class DataframeJobhostSummaryUsage(Base):
             if 'not supported between instances' in str(e) and ('float' in str(e) and 'Timestamp' in str(e)):
                 # Handle mixed float/Timestamp data by ensuring proper datetime conversion
                 add_span_attributes(current_span, **{'dataframe.group.datetime_conversion_error': str(e)})
-                
+
                 # Ensure datetime columns are properly converted before aggregation
                 for col in ['created', 'job_created']:
                     if col in dataframe.columns:
                         dataframe[col] = pd.to_datetime(dataframe[col], errors='coerce')
-                
+
                 # Retry aggregation after datetime conversion
                 group = dataframe.groupby(self.unique_index_columns(), dropna=False).agg(
                     task_runs=('task_runs', 'sum'),

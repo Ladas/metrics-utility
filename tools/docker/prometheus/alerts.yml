@@ -1,0 +1,197 @@
+groups:
+  - name: infrastructure.alerts
+    rules:
+      # CRITICAL ALERTS
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 99
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% for more than 5 minutes on {{ $labels.instance }}"
+
+      - alert: ContainerHighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{name=~".+"}[5m]) * 100 > 99
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Critical CPU usage in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} CPU usage is {{ $value }}% for more than 5 minutes"
+
+      - alert: OutOfMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 1
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "System out of memory on {{ $labels.instance }}"
+          description: "Available memory is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: ContainerOutOfMemory
+        expr: container_memory_usage_bytes{name=~".+"} / container_spec_memory_limit_bytes{name=~".+"} * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Container {{ $labels.name }} out of memory"
+          description: "Container {{ $labels.name }} memory usage is {{ $value }}% of limit"
+
+      - alert: HighDiskUsage
+        expr: 100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100) > 95
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Disk space critical on {{ $labels.instance }}"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: ContainerDown
+        expr: up{job="cadvisor"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Container monitoring down"
+          description: "cAdvisor is not accessible for container metrics collection"
+
+      # WARNING ALERTS
+      - alert: HighCPUUsageWarning
+        expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% for more than 10 minutes on {{ $labels.instance }}"
+
+      - alert: ContainerHighCPUUsageWarning
+        expr: rate(container_cpu_usage_seconds_total{name=~".+"}[5m]) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High CPU usage in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} CPU usage is {{ $value }}% for more than 10 minutes"
+
+      - alert: LowMemoryWarning
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 10
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Low memory on {{ $labels.instance }}"
+          description: "Available memory is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: ContainerHighMemoryWarning
+        expr: container_memory_usage_bytes{name=~".+"} / container_spec_memory_limit_bytes{name=~".+"} * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High memory usage in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} memory usage is {{ $value }}% of limit"
+
+      - alert: HighDiskUsageWarning
+        expr: 100 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} * 100) > 85
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High disk usage on {{ $labels.instance }}"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: HighLoadAverage
+        expr: node_load5 > (count by (instance) (count by (cpu) (node_cpu_seconds_total{mode="idle"}))) * 1.5
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High load average on {{ $labels.instance }}"
+          description: "5-minute load average is {{ $value }} (1.5x CPU cores) on {{ $labels.instance }}"
+
+      - alert: HighNetworkIO
+        expr: rate(container_network_receive_bytes_total{name=~".+"}[5m]) + rate(container_network_transmit_bytes_total{name=~".+"}[5m]) > 100*1024*1024
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High network I/O in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} network I/O is {{ $value }} bytes/s for more than 15 minutes"
+
+      - alert: HighDiskIO
+        expr: rate(container_fs_reads_bytes_total{name=~".+"}[5m]) + rate(container_fs_writes_bytes_total{name=~".+"}[5m]) > 50*1024*1024
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "High disk I/O in container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} disk I/O is {{ $value }} bytes/s for more than 15 minutes"
+
+  - name: metrics-utility.alerts
+    rules:
+      # Application-specific alerts
+      - alert: MetricsUtilityContainerDown
+        expr: up{job="cadvisor",name="metrics-utility-env-otel"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: application
+        annotations:
+          summary: "Metrics utility container is down"
+          description: "The metrics-utility-env-otel container is not accessible"
+
+      - alert: RollupProcessingStuck
+        expr: rate(container_cpu_usage_seconds_total{name="metrics-utility-env-otel"}[30m]) < 0.01
+        for: 30m
+        labels:
+          severity: warning
+          team: application
+        annotations:
+          summary: "Metrics utility appears stuck"
+          description: "No CPU activity in metrics-utility-env-otel for 30 minutes - may be stuck or idle"
+
+      - alert: HighRollupMemoryUsage
+        expr: container_memory_usage_bytes{name="metrics-utility-env-otel"} > 2*1024*1024*1024
+        for: 10m
+        labels:
+          severity: warning
+          team: application
+        annotations:
+          summary: "High memory usage in metrics utility"
+          description: "Metrics utility container is using {{ $value }} bytes of memory"
+
+      - alert: TempoDown
+        expr: up{job="tempo"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: observability
+        annotations:
+          summary: "Tempo tracing backend is down"
+          description: "Tempo is not accessible for distributed tracing"
+
+      - alert: PrometheusDown
+        expr: up{job="prometheus"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: observability
+        annotations:
+          summary: "Prometheus metrics backend is down"
+          description: "Prometheus is not accessible for metrics collection"

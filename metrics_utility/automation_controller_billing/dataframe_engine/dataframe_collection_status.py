@@ -83,12 +83,12 @@ class DataframeCollectionStatus(Base):
         """Group collection status dataframe by unique index columns."""
         if dataframe is None or dataframe.empty:
             return self.empty()
-        
+
         # For collection status, we group by unique_index_columns and sum elapsed time
         group = dataframe.groupby(self.unique_index_columns(), dropna=False).agg(
             elapsed=('elapsed', 'sum')  # Sum elapsed time for identical entries
         )
-        
+
         # Cast types to match the table
         result = self.cast_dataframe(group, self.cast_types())
         return result
@@ -118,7 +118,7 @@ class DataframeCollectionStatus(Base):
             'status': str,
         }
 
-    @staticmethod  
+    @staticmethod
     def operations():
         return {
             'elapsed': 'sum',  # Sum elapsed time when merging rollups
